@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: deal-tracker-pods2
+    env: python
+    plan: starter          # a paid disk requires a paid plan; see note below
+    buildCommand: pip install -r requirements.txt
+    # Single worker because auth tokens are stored in memory (see app.py).
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
+    disk:                  # persists db.sqlite3 across deploys/restarts
+      name: deal-db
+      mountPath: /opt/render/project/src
+      sizeGB: 1
+
+# NOTE: Render's persistent disk (above) is only available on PAID plans.
+# For a 100% FREE Render deploy, delete the `plan:` and `disk:` blocks — but then
+# db.sqlite3 is wiped on every restart/redeploy. For free AND durable data,
+# deploy to PythonAnywhere instead (see README, Deployment section).
