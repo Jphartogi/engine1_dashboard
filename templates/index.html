@@ -477,6 +477,7 @@
             <option value="rev_asc">Rev 2026 (Low → High)</option>
             <option value="name_asc">Name (A → Z)</option>
           </select>
+          <button id="bulkDeleteBtn" class="text-sm px-4 py-2 rounded-lg transition" style="display:none;background:var(--danger-soft);color:var(--danger)"><i class="fa-solid fa-trash mr-1.5"></i>Delete Selected (<span id="bulkDeleteCount">0</span>)</button>
           <button id="exportPdfBtn" class="text-sm card px-4 py-2 transition" style="color:var(--text)" onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='var(--surface)'"><i class="fa-solid fa-file-pdf mr-1.5" style="color:var(--danger)"></i>Export PDF</button>
           <button id="addDealBtn" class="btn-primary text-sm px-4 py-2 rounded-lg transition"><i class="fa-solid fa-plus mr-1.5"></i>Add Opportunity</button>
         </div>
@@ -489,6 +490,7 @@
             <table class="w-full text-sm">
               <thead style="background:var(--surface-2); color:var(--text-muted)">
                 <tr class="text-xs uppercase tracking-wide">
+                  <th id="bulkSelectHeaderCell" class="text-left px-4 py-3 font-medium" style="display:none;width:1%"><input type="checkbox" id="selectAllDeals"></th>
                   <th class="text-left px-4 py-3 font-medium">Opportunity</th>
                   <th class="text-left px-4 py-3 font-medium">Customer</th>
                   <th class="text-left px-4 py-3 font-medium">AM</th>
@@ -1160,6 +1162,12 @@ let POD_LABEL = localStorage.getItem('dt_pod_label') || '';
 // '' means "All PODS combined", or a specific pod key to drill into just that one.
 let ENGINE1_POD_FILTER = '';
 let DEALS = [], ALL_DEALS = [], CONFIG = { target_amount:0, strategic_pillars:[], squads:[], stages:[], am_targets:{}, am_achievements:{}, am_recurring:{}, current_achievement:0, recurring_revenue:0, max_login_logs:100 }, USERS = [], AMS = [];
+// Bulk-delete on the Tracker: admin/account_manager/super_admin only (same permission
+// rule as single-delete, checked per-id server-side too); selection persists across
+// re-renders (filtering, sorting, paging) until cleared or the deals reload.
+const BULK_DELETE_ROLES_JS = ['admin','account_manager','super_admin'];
+let selectedDealIds = new Set();
+let currentPageEditableIds = [];
 let nextActionsDraft = [], confirmCallback = null, analyticsFilters = {};
 let dealModalDirty = false, dealModalRestricted = false, dealAutosaveTimer = null, dealAutosaveInFlight = false;
 let currentPage = 1, calMonth = new Date();
@@ -1359,6 +1367,7 @@ async function enterApp(){
   document.getElementById('amTargetsImportWrap').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('trackerImportWrap').style.display = ROLE==='super_admin' ? '' : 'none';
   document.getElementById('addDealBtn').style.display = (ROLE==='admin'||ROLE==='account_manager'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('bulkSelectHeaderCell').style.display = BULK_DELETE_ROLES_JS.includes(ROLE) ? '' : 'none';
   // Solution / Project / Product can see every opportunity (read-only, for context) and
   // their own task inbox, but not Calendar / Analytics / Performance / any edit control.
   const isCrossFunctional = CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE);
@@ -1546,10 +1555,18 @@ function renderDealsTable(){
   const rows=all.slice(start,start+pageSize);
   const tbody=document.getElementById('dealsTableBody'); tbody.innerHTML='';
   document.getElementById('noDealsMsg').classList.toggle('hidden',total>0);
+  const canBulk=BULK_DELETE_ROLES_JS.includes(ROLE);
+  // Drop selected ids that scrolled out of the current dataset entirely (e.g. filters
+  // changed), so the count/button stay accurate.
+  if(canBulk){
+    const liveIds=new Set(all.map(d=>d.id));
+    [...selectedDealIds].forEach(id=>{ if(!liveIds.has(id)) selectedDealIds.delete(id); });
+  }
   rows.forEach(deal=>{
     const editable=canEditDeal(deal);
     const tr=document.createElement('tr'); tr.className='row-click'; tr.style.borderTop='1px solid var(--border)';
     tr.innerHTML=`
+      ${canBulk?`<td class="px-4 py-3" onclick="event.stopPropagation()"><input type="checkbox" class="deal-select-cb" data-id="${deal.id}" ${editable?'':'disabled title="Not yours to delete"'} ${selectedDealIds.has(deal.id)?'checked':''}></td>`:''}
       <td class="px-4 py-3 font-medium" style="color:var(--text)">${escapeHtml(deal.deal_name)}${deal.is_blocked?' <i class="fa-solid fa-triangle-exclamation ml-1" style="color:var(--danger)"></i>':''}</td>
       <td class="px-4 py-3" style="color:var(--text-muted)">${escapeHtml(deal.customer)}</td>
       <td class="px-4 py-3">${PODLESS_ROLES_JS.includes(ROLE)&&!ENGINE1_POD_FILTER&&deal.pod_label?`<span class="chip mr-1" style="color:var(--primary);border-color:var(--primary)">${escapeHtml(deal.pod_label)}</span>`:''}<span class="chip" style="color:var(--text-muted)">${escapeHtml(deal.assigned_am.split(' ')[0])}</span></td>
@@ -1586,6 +1603,18 @@ function renderDealsTable(){
   tbody.querySelectorAll('.edit-btn').forEach(b=>b.addEventListener('click',()=>openDealModal(parseInt(b.dataset.id))));
   tbody.querySelectorAll('.del-btn').forEach(b=>b.addEventListener('click',()=>confirmDeleteDeal(parseInt(b.dataset.id))));
   tbody.querySelectorAll('.tasks-btn').forEach(b=>b.addEventListener('click',()=>openDealModal(parseInt(b.dataset.id))));
+  if(canBulk){
+    tbody.querySelectorAll('.deal-select-cb').forEach(cb=>cb.addEventListener('change',e=>{
+      const id=parseInt(e.target.dataset.id);
+      if(e.target.checked) selectedDealIds.add(id); else selectedDealIds.delete(id);
+      updateBulkDeleteUI();
+    }));
+    currentPageEditableIds=rows.filter(canEditDeal).map(d=>d.id);
+    const allSelOnPage=currentPageEditableIds.length>0 && currentPageEditableIds.every(id=>selectedDealIds.has(id));
+    const selectAll=document.getElementById('selectAllDeals');
+    selectAll.checked=allSelOnPage; selectAll.disabled=currentPageEditableIds.length===0;
+    updateBulkDeleteUI();
+  }
   tbody.querySelectorAll('.progress-slider').forEach(sl=>{
     sl.addEventListener('input',e=>{ e.target.nextElementSibling.textContent=e.target.value+'%'; });
     sl.addEventListener('change',async e=>{
@@ -1601,6 +1630,34 @@ function confirmDeleteDeal(id){
     catch(err){ showToast(err.message,true); }
   });
 }
+function updateBulkDeleteUI(){
+  const btn=document.getElementById('bulkDeleteBtn');
+  const n=selectedDealIds.size;
+  document.getElementById('bulkDeleteCount').textContent=String(n);
+  btn.style.display = BULK_DELETE_ROLES_JS.includes(ROLE) ? '' : 'none';
+  btn.disabled = n===0;
+  btn.style.opacity = n===0 ? '0.5' : '1';
+  btn.style.cursor = n===0 ? 'default' : 'pointer';
+}
+document.getElementById('selectAllDeals').addEventListener('change',e=>{
+  if(e.target.checked) currentPageEditableIds.forEach(id=>selectedDealIds.add(id));
+  else currentPageEditableIds.forEach(id=>selectedDealIds.delete(id));
+  renderDealsTable();
+});
+document.getElementById('bulkDeleteBtn').addEventListener('click',()=>{
+  const n=selectedDealIds.size;
+  if(n===0) return;
+  openConfirm(`Delete ${n} selected opportunit${n===1?'y':'ies'}? This cannot be undone.`, async()=>{
+    try{
+      const data=await api('/api/deals/bulk_delete',{method:'POST',body:JSON.stringify({ids:[...selectedDealIds]})});
+      selectedDealIds.clear();
+      let msg=`${data.deleted} opportunit${data.deleted===1?'y':'ies'} deleted`;
+      if(data.skipped && data.skipped.length) msg+=`, ${data.skipped.length} skipped (not permitted or already gone)`;
+      showToast(msg, data.skipped && data.skipped.length>0 && data.deleted===0);
+      await loadDeals();
+    }catch(err){ showToast(err.message,true); }
+  });
+});
 
 /* ================= DETAIL DRAWER (double-click) ================= */
 function openDetail(id){

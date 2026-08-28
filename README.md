@@ -131,6 +131,13 @@ Enforced both in the UI and server-side (`can_edit_deal()`, `deal_visible_to()`,
   High → Low, so opportunities closest to 100% surface first; also TCV, Rev 2026, name), and
   **pagination** (10/25/50 rows per page). Inline progress sliders, blocker flags, and
   next-action checklists. **Double-click any row** to open a full opportunity detail drawer.
+- **Bulk delete** — admin, account_manager, and super_admin only (never management, the
+  cross-functional roles, or the read-only engine1_exec). A checkbox column and a header
+  "select all" appear on the Tracker; only rows that role could delete one at a time are
+  selectable (an account_manager still only ever sees a checkbox on their own opportunities), and
+  "Delete Selected (N)" asks for one confirmation before removing all of them. The server rechecks
+  the same per-opportunity permission for every id in the request — a row that isn't actually yours
+  is silently skipped and reported back rather than deleting anything it shouldn't.
 - **Strategy per opportunity** — every deal has a free-text **Strategy** ("how you'll win & close"),
   editable by the owning AM. It shows in the detail drawer and drives the next-action plan, and is
   summarized for management in a **Strategy Playbook** card on the Analytics tab (grouped by AM,
@@ -303,7 +310,11 @@ affect another POD's data even by guessing an ID.
 **Deals** — `GET /api/deals?am=&pillar=&stage=&quarter=&pod=`, `POST /api/deals` (admin/account_manager
 in their own POD, or `super_admin` with an explicit `pod`), `PUT /api/deals/<id>`,
 `DELETE /api/deals/<id>`, `PUT /api/deals/<id>/progress`, `PUT /api/deals/<id>/blocker` (mutations
-require admin, the owning AM, or super_admin). Each deal includes `pod` and a display `pod_label`.
+require admin, the owning AM, or super_admin). `POST /api/deals/bulk_delete` (admin/account_manager/
+super_admin) takes `{"ids": [...]}` and applies the exact same per-id permission check as single
+delete — ids that don't exist or aren't editable by the caller are skipped and returned in a
+`skipped` list (with a reason) rather than failing the whole request; `deleted`/`deleted_ids` report
+what actually went through. Each deal includes `pod` and a display `pod_label`.
 **Users** — `GET/POST /api/users`, `PUT/DELETE /api/users/<id>`. A POD's own admin is confined to
 that POD and to pod-scoped roles (`admin`, `account_manager`, `management`, `solution`, `project`,
 `product`) - it can never create, promote to, or manage an `engine1_exec`/`super_admin` account.

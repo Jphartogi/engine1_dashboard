@@ -1098,6 +1098,40 @@ def delete_deal(deal_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/deals/bulk_delete", methods=["POST"])
+@login_required(roles=("admin", "account_manager", "super_admin"))
+def bulk_delete_deals():
+    """Delete several opportunities in one request. Same permission rule as the
+    single-delete endpoint (can_edit_deal), just checked per id - an account_manager
+    can only ever delete their own opportunities, admin only within their own POD,
+    super_admin anywhere. IDs that don't exist or aren't editable by this user are
+    skipped and reported back rather than failing the whole batch."""
+    data = request.get_json(force=True) or {}
+    ids = data.get("ids") or []
+    try:
+        ids = [int(i) for i in ids]
+    except (TypeError, ValueError):
+        return jsonify({"error": "ids must be a list of integers"}), 400
+    if not ids:
+        return jsonify({"error": "No opportunities selected"}), 400
+
+    db = get_db()
+    user = g.current_user
+    deleted_ids, skipped = [], []
+    for deal_id in ids:
+        row = db.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)).fetchone()
+        if not row:
+            skipped.append({"id": deal_id, "reason": "not found"})
+            continue
+        if not can_edit_deal(user, row):
+            skipped.append({"id": deal_id, "reason": "not permitted", "deal_name": row["deal_name"]})
+            continue
+        db.execute("DELETE FROM deals WHERE id = ?", (deal_id,))
+        deleted_ids.append(deal_id)
+    db.commit()
+    return jsonify({"ok": True, "deleted": len(deleted_ids), "deleted_ids": deleted_ids, "skipped": skipped})
+
+
 @app.route("/api/deals/<int:deal_id>/progress", methods=["PUT"])
 @login_required(roles=("admin", "account_manager", "super_admin"))
 def update_progress(deal_id):
