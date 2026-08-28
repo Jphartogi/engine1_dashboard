@@ -418,7 +418,49 @@ live PythonAnywhere instance:
 4. Recommended right after reloading: **Settings → Data Backup → Export all data** so you have a
    restore point, then fill in the per-AM Target / YTD / Recurring figures.
 
-## 9. Notes
+## 9. One-time onboarding: bulk import from a Sales Activity Tracker workbook
+
+When a POD's real pipeline already lives in a spreadsheet in the shared "Sales Activity Tracker"
+layout (the same one-row-per-activity shape `Analytics → Export Tracker sheet` produces — a "PODS "
+column, Opportunity Name, Customer, Account Manager, TCV, Rev 2026, Target Quarter, an
+8-Enterprise-Proof "Pillar" column, Activity/Action, Status, Due Date, Completed Date, Notes),
+**Settings → Bulk Import from Sales Activity Tracker** (super_admin only) turns it straight into
+opportunities:
+
+- Rows are grouped back into one deal per (POD, Opportunity Name, Customer), with every row's
+  activity becoming an evidence entry under the matching one of the 8 Enterprise Proofs.
+- Each row's own **"PODS "** column decides which app POD it lands in (matched against the POD
+  labels case-insensitively) — so **one upload can populate multiple PODS at once**, which is why
+  this import is restricted to `super_admin` and no other role can reach it.
+- A new Account Manager name found in the file gets an `account_manager` account created
+  automatically (temporary password `changeme123`) so per-AM filtering and targets work right away.
+- This workbook shape doesn't carry a Strategic Pillar (business category) or Stage, so every
+  imported deal defaults to the first configured Strategic Pillar and "Prospecting" — go through and
+  correct those per opportunity afterward.
+- **Additive only**: it only ever creates new opportunities, never updates or deletes existing ones.
+  Re-uploading the same file twice will create duplicates — there's no ID column in this format to
+  match against, unlike `Settings → Data Backup → Import`.
+- Rows with a blank or unrecognised POD label are skipped and reported back in the result, not
+  silently dropped.
+
+**If your existing seeded team turns out to be the wrong POD number** (e.g. you seeded "PODS 1" with
+a team that turns out to actually be the real PODS 2 in your org, and now need to bring in the real
+PODS 1's data), correct that *before* running the bulk import: `scripts/swap_pod1_pod2.py` swaps
+every deal, task, user, login log, performance snapshot, and each POD's own target/AM figures
+between PODS 1 and PODS 2 in one non-destructive pass (the shared Stages/Pillars taxonomy is
+untouched, since it isn't POD-specific). Run it once against your live database:
+
+```bash
+cd ~/engine1_dashboard      # or wherever app.py lives
+python3 scripts/swap_pod1_pod2.py
+```
+
+It prints a before/after row count per POD so you can confirm the swap did what you expected, and
+also renames the bootstrap `pods1_admin`/`pods2_admin` accounts to match wherever they ended up. It's
+safe to re-run — running it twice just swaps back. Take a `Settings → Data Backup → Export` first if
+you want an extra safety net, and restart/reload the web app afterward so it picks up the change.
+
+## 10. Notes
 
 - Session tokens are held in-memory (`TOKENS` in `app.py`); a server restart requires users to log
   in again. Passwords are hashed with PBKDF2 (`werkzeug.security`).

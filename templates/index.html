@@ -767,6 +767,16 @@
             </div>
             <p id="importResult" class="text-xs mt-3" style="color:var(--text-muted)"></p>
           </div>
+
+          <div id="trackerImportWrap" class="card elev p-5 lg:col-span-2" style="display:none">
+            <p class="text-sm font-medium mb-1"><i class="fa-solid fa-file-import mr-1.5" style="color:var(--primary)"></i>Bulk Import from Sales Activity Tracker (.xlsx)</p>
+            <p class="text-[11px] mb-4" style="color:var(--text-faint)">One-time onboarding import: upload a "Sales Activity Tracker" workbook (same layout as <b>Export Tracker sheet</b> on Analytics — one row per activity, with its own POD column) and it creates a new opportunity per row group, distributed into the 8-proof Execution Framework. Each row's own POD column decides which POD it lands in, so one upload can populate multiple PODS at once — this is why only Super Admin can do it. New Account Managers found in the file get an account automatically (temporary password <b>changeme123</b>). This workbook format doesn't carry Strategic Pillar or Stage, so every imported deal defaults to the first configured Pillar and "Prospecting" — review and correct those per opportunity afterward. This only adds new opportunities; it never updates or deletes existing ones, so re-uploading the same file twice will create duplicates.</p>
+            <div class="flex flex-wrap items-center gap-3">
+              <input id="trackerImportFile" type="file" accept=".xlsx" class="text-xs" style="color:var(--text-muted)">
+              <button id="trackerImportBtn" class="text-sm px-4 py-2 rounded-lg" style="border:1px solid var(--border);color:var(--text)"><i class="fa-solid fa-file-arrow-up mr-1.5"></i>Import</button>
+            </div>
+            <p id="trackerImportResult" class="text-xs mt-3" style="color:var(--text-muted)"></p>
+          </div>
         </div>
       </section>
 
@@ -1347,6 +1357,7 @@ async function enterApp(){
   document.getElementById('quickConfigBtn').style.display = (ROLE==='engine1_exec'||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('perfUploadWrap').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('amTargetsImportWrap').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('trackerImportWrap').style.display = ROLE==='super_admin' ? '' : 'none';
   document.getElementById('addDealBtn').style.display = (ROLE==='admin'||ROLE==='account_manager'||ROLE==='super_admin') ? '' : 'none';
   // Solution / Project / Product can see every opportunity (read-only, for context) and
   // their own task inbox, but not Calendar / Analytics / Performance / any edit control.
@@ -3227,6 +3238,30 @@ document.getElementById('importXlsxBtn').addEventListener('click',()=>{
       out.innerHTML=`<span style="color:var(--success)">Imported.</span> ${s.updated} updated, ${s.created} created, ${s.deleted} deleted, ${s.users_created} new user(s)${s.config_updated?', configuration updated':''}.`;
       showToast('Import complete');
       await loadConfig(); await loadAMs(); await loadDeals(); if(ROLE==='admin'||ROLE==='super_admin') await loadUsers();
+      renderSettings();
+    }catch(err){ out.innerHTML=`<span style="color:var(--danger)">${escapeHtml(err.message)}</span>`; showToast(err.message,true); }
+  });
+});
+document.getElementById('trackerImportBtn').addEventListener('click',()=>{
+  const f=document.getElementById('trackerImportFile').files[0];
+  if(!f){ showToast('Choose the tracker .xlsx first',true); return; }
+  openConfirm(`Import "${f.name}"? This only adds new opportunities across whichever PODS appear in the file — it never updates or deletes existing ones. Re-uploading the same file again will create duplicates.`, async()=>{
+    const out=document.getElementById('trackerImportResult');
+    try{
+      out.textContent='Importing...';
+      const fd=new FormData(); fd.append('file',f);
+      const res=await fetch('/api/import/tracker_xlsx',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:fd});
+      const data=await res.json();
+      if(!res.ok) throw new Error(data.error||'Import failed');
+      const podList=data.pods_touched.map(p=>POD_LABELS_JS[p]||p).join(', ')||'none';
+      let msg=`<span style="color:var(--success)">Imported.</span> ${data.created} opportunity(ies) created across ${podList}. ${data.ams_created} new Account Manager account(s) created.`;
+      if(data.skipped_no_pod) msg+=` ${data.skipped_no_pod} row(s) skipped (blank POD column).`;
+      if(data.skipped_pod_labels.length) msg+=` Unrecognised POD label(s) skipped: ${escapeHtml(data.skipped_pod_labels.join(', '))}.`;
+      if(data.note) msg+=`<br><span style="color:var(--warning)">${escapeHtml(data.note)}</span>`;
+      out.innerHTML=msg;
+      showToast('Tracker import complete');
+      document.getElementById('trackerImportFile').value='';
+      await loadConfig(); await loadAMs(); await loadDeals(); await loadUsers();
       renderSettings();
     }catch(err){ out.innerHTML=`<span style="color:var(--danger)">${escapeHtml(err.message)}</span>`; showToast(err.message,true); }
   });

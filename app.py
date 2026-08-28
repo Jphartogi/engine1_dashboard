@@ -2239,6 +2239,191 @@ def import_am_targets():
     return jsonify({"ok": True, "updated": updated, "unmatched": unmatched, "config": merged})
 
 
+# --------------------------------------------------------------------------
+# One-off bulk import from a "Sales Activity Tracker" workbook (the same
+# layout /api/export/tracker_xlsx produces: one row per activity, with its
+# own "PODS " column). Unlike every other import, a single upload can create
+# opportunities in more than one POD at once - so this is super_admin only,
+# never a POD's own admin.
+# --------------------------------------------------------------------------
+_POD_LABEL_TO_KEY = {v.strip().lower(): k for k, v in POD_LABELS.items()}
+_TRACKER_STATUS_TO_ENTRY = {"not started": "not_started", "in progress": "in_progress", "done": "done"}
+
+
+def _tracker_cell_date(v):
+    if v is None or v == "":
+        return ""
+    return v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else str(v).strip()[:10]
+
+
+def _tracker_cell_int(v):
+    if v is None or v == "":
+        return 0
+    try:
+        return int(float(str(v).replace(",", "")) if isinstance(v, str) else v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _tracker_proof_key(pillar_cell):
+    """'1. Proof of Qualification' -> 'qualification' (matches by name, ignoring
+    the leading number, so a mislabeled/renumbered prefix still matches)."""
+    label = str(pillar_cell or "").strip()
+    if "." in label[:3]:
+        label = label.split(".", 1)[1].strip()
+    label = label.lower()
+    return next((k for k in PROOF_KEYS if PROOF_NAMES[k].lower() == label), None)
+
+
+def _ensure_am_user(db, pod, full_name):
+    """Make sure a matching account_manager user exists for this POD so the AM
+    shows up in filters/targets right away, without ever touching an existing
+    account. Returns True if a new one was created."""
+    full_name = full_name.strip()
+    if not full_name:
+        return False
+    existing = db.execute(
+        "SELECT id FROM users WHERE pod = ? AND role = 'account_manager' AND full_name = ?",
+        (pod, full_name),
+    ).fetchone()
+    if existing:
+        return False
+    base = "".join(ch for ch in full_name.lower() if ch.isalnum())[:20] or "am"
+    candidate, i = base, 1
+    while db.execute("SELECT 1 FROM users WHERE username = ?", (candidate,)).fetchone():
+        i += 1
+        candidate = f"{base}{i}"
+    db.execute(
+        "INSERT INTO users (username, password, role, pod, full_name) VALUES (?, ?, 'account_manager', ?, ?)",
+        (candidate, _hash("changeme123"), pod, full_name),
+    )
+    return True
+
+
+@app.route("/api/import/tracker_xlsx", methods=["POST"])
+@login_required(roles=("super_admin",))
+def import_tracker_xlsx():
+    """Bulk-create opportunities from a Sales Activity Tracker workbook (one
+    row per activity, grouped back into deals + 8-proof execution framework
+    entries). Each row's own "PODS " column decides which POD it lands in -
+    this is the only import that can write into more than one POD at once,
+    which is why it's restricted to super_admin."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return jsonify({"error": "openpyxl is not installed on the server. "
+                                 "Run: pip install --user openpyxl, then reload."}), 500
+
+    upload = request.files.get("file")
+    if not upload:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    try:
+        wb = load_workbook(upload, data_only=True)
+    except Exception as exc:
+        return jsonify({"error": f"Could not read this file as .xlsx ({exc})"}), 400
+
+    sheet_name = "Tracker" if "Tracker" in wb.sheetnames else wb.sheetnames[0]
+    ws = wb[sheet_name]
+
+    db = get_db()
+    shared = config_to_dict(get_shared_config_row(db))
+    default_pillar = (shared["strategic_pillars"] or [""])[0]
+
+    groups, order = {}, []
+    skipped_no_pod = 0
+    skipped_pod_labels = set()
+
+    for raw in ws.iter_rows(min_row=2, values_only=True):
+        r = list(raw) + [None] * (14 - len(raw))
+        (_no, pod_label, opp, customer, am, tcv, rev26, quarter,
+         pillar, activity, status, due, completed, notes) = r[:14]
+        if not opp:
+            continue
+        if not pod_label or not str(pod_label).strip():
+            skipped_no_pod += 1
+            continue
+        pod_key = _POD_LABEL_TO_KEY.get(str(pod_label).strip().lower())
+        if not pod_key:
+            skipped_pod_labels.add(str(pod_label).strip())
+            continue
+
+        key = (pod_key, str(opp).strip(), str(customer or "").strip())
+        if key not in groups:
+            groups[key] = {
+                "pod": pod_key,
+                "deal_name": str(opp).strip(),
+                "customer": str(customer or "").strip(),
+                "assigned_am": str(am or "").strip(),
+                "estimated_value": _tracker_cell_int(tcv),
+                "revenue_2026": _tracker_cell_int(rev26),
+                "target_quarter": str(quarter or "").strip(),
+                "entries": [],
+            }
+            order.append(key)
+
+        proof_key = _tracker_proof_key(pillar)
+        due_txt = _tracker_cell_date(due)
+        completed_txt = _tracker_cell_date(completed)
+        status_key = _TRACKER_STATUS_TO_ENTRY.get(str(status or "").strip().lower(), "not_started")
+        text = str(activity or "").strip()
+        if notes and str(notes).strip():
+            text = f"{text} — {str(notes).strip()}" if text else str(notes).strip()
+        date_val = completed_txt if (status_key == "done" and completed_txt) else due_txt
+        groups[key]["entries"].append((proof_key, {
+            "text": text or "(activity to be defined)", "date": date_val, "end": "", "status": status_key,
+        }))
+
+    created = 0
+    ams_created = 0
+    pods_touched = set()
+    for key in order:
+        g = groups[key]
+        proofs = {k: {"status": "not_started", "due": "", "entries": []} for k in PROOF_KEYS}
+        for proof_key, entry in g["entries"]:
+            if proof_key:
+                proofs[proof_key]["entries"].append(entry)
+        for pk in PROOF_KEYS:
+            entries = proofs[pk]["entries"]
+            if not entries:
+                status = "not_started"
+            elif all(e["status"] == "done" for e in entries):
+                status = "done"
+            elif any(e["status"] in ("done", "in_progress") for e in entries):
+                status = "in_progress"
+            else:
+                status = "not_started"
+            proofs[pk]["status"] = status
+
+        db.execute(
+            """INSERT INTO deals
+               (pod, deal_name, customer, assigned_am, squad, strategic_pillar, estimated_value,
+                revenue_2026, target_quarter, stage, progress, is_blocked, blocker_description,
+                next_actions, strategy, proofs, expected_po_date, expected_revenue_date, updated_at)
+               VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, 'Prospecting', 0, 0, '', '[]', '', ?, '', '',
+                       CURRENT_TIMESTAMP)""",
+            (g["pod"], g["deal_name"], g["customer"], g["assigned_am"], default_pillar,
+             g["estimated_value"], g["revenue_2026"], g["target_quarter"], json.dumps(proofs)),
+        )
+        created += 1
+        pods_touched.add(g["pod"])
+        if _ensure_am_user(db, g["pod"], g["assigned_am"]):
+            ams_created += 1
+
+    db.commit()
+    return jsonify({
+        "ok": True,
+        "created": created,
+        "ams_created": ams_created,
+        "pods_touched": sorted(pods_touched),
+        "skipped_no_pod": skipped_no_pod,
+        "skipped_pod_labels": sorted(skipped_pod_labels),
+        "note": (f"Every imported deal defaulted to Strategic Pillar '{default_pillar}' and Stage "
+                 "'Prospecting' - this workbook format doesn't carry either, so review and correct "
+                 "them per opportunity.") if created else None,
+    })
+
+
 @app.route("/api/performance/import", methods=["POST"])
 @login_required(roles=("admin", "super_admin"))
 def import_performance():
