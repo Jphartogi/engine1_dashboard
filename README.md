@@ -18,16 +18,23 @@ completely walled off from the other two.
   sees, queries, exports, or edits their own POD's rows; this is enforced **server-side**, not just
   hidden in the UI, including against a user directly guessing another POD's opportunity/task/user
   ID.
-- **One Engine-1-wide role, `engine1_exec`,** belongs to no single POD. It gets a **read-only**
-  view across all three PODS combined by default (deals, tasks, KPIs summed and merged), or can
-  drill into just one POD via the **POD selector** in the top header. It can never create, edit, or
-  delete an opportunity, task, or user in any POD.
+- **Two Engine-1-wide roles, belonging to no single POD, both using the same POD selector** in
+  the top header to choose which POD's data they're looking at (or, for the read-only one, to
+  combine all three):
+  - **`engine1_exec`** — **read-only** across all three PODS combined by default (deals, tasks,
+    KPIs summed and merged), or drilled into just one POD. Can never create, edit, or delete an
+    opportunity, task, or user in any POD. The one thing it *can* edit is the shared Stages/
+    Pillars taxonomy (see below).
+  - **`super_admin`** — **full read/write everywhere**: create/edit/delete any opportunity, task,
+    or user in any POD (selecting which POD to act in via the same header POD selector), plus
+    everything `engine1_exec` can do. It's the only role that can create or manage another
+    `engine1_exec` or `super_admin` account — a POD's own admin can never do that.
 - **Shared vs. per-POD configuration.** **Deal Stages** and **Strategic Pillars** are one
   Engine-1-wide list (Configuration / "Lists & Automation" tab) so terminology stays consistent
-  division-wide — and only `engine1_exec` can edit that list. Everything money-related — the
+  division-wide — editable only by `engine1_exec` or `super_admin`. Everything money-related — the
   full-year **target**, **YTD achieved**, **recurring revenue**, and each **AM's individual
-  target/actual/recurring** — is tracked **per POD**, editable only by that POD's own admin in
-  Settings.
+  target/actual/recurring** — is tracked **per POD**, editable by that POD's own admin in Settings,
+  or by `super_admin` acting on whichever POD is currently selected.
 - **PODS 1 carries the real, original pipeline** this app was built from (31 opportunities across
   4 real Account Managers — Anisa Rahmy, Arie Prabowo, Ashari, Dimas). **PODS 2 and PODS 3 start
   empty**, each with one bootstrap admin account, ready for those teams to configure and populate.
@@ -57,8 +64,9 @@ first run (users, config, and PODS 1's 31 opportunities). Set `PORT` to change t
 | `pods2_admin`   | `changeme123` | admin           | PODS 2 | Full access within PODS 2 (starts empty)              |
 | `pods3_admin`   | `changeme123` | admin           | PODS 3 | Full access within PODS 3 (starts empty)              |
 | `engine1_exec`  | `changeme123` | engine1_exec    | *(none)* | Read-only across all 3 PODS combined, or drilled into one; exclusively manages the shared Stages/Pillars |
+| `super_admin`   | `changeme123` | super_admin     | *(none)* | Full read/write in any POD (pick which via the header POD selector); the only role that can create other engine1_exec/super_admin accounts |
 
-> **Change every one of these passwords before a real rollout** — especially the three
+> **Change every one of these passwords before a real rollout** — especially the four
 > `changeme123` bootstrap accounts — via Settings → User Management (each POD's own admin manages
 > their own POD's users; there is no cross-POD user management anywhere in the app).
 
@@ -90,9 +98,16 @@ them from Settings → User Management → Add User when that POD is ready to br
   opportunity, task, or user anywhere. The one thing it *can* edit is the Engine-1-wide **Deal
   Stages / Strategic Pillars** list under "Lists & Automation" — the one piece of configuration
   meant to stay consistent across all three PODS rather than be owned by any single one.
+- **super_admin** (Engine-1-wide, no POD) — everything `engine1_exec` can do, plus full read/write:
+  create, edit, and delete opportunities, tasks, and users in **any** POD, acting on whichever POD
+  is picked via the same header **POD selector** (creating an opportunity, importing a backup, or
+  editing a POD's target figures all require a specific POD to be selected first — "All PODS
+  combined" only makes sense for reading). It's the only role that can create or edit another
+  `engine1_exec` or `super_admin` account, or move a user between PODS; a POD's own admin is
+  permanently confined to managing users within that one POD.
 
-Enforced both in the UI and server-side (`can_edit_deal()`, `deal_visible_to()`, `query_pod_for()`
-in `app.py`).
+Enforced both in the UI and server-side (`can_edit_deal()`, `deal_visible_to()`, `query_pod_for()`,
+`mutation_pod_for()` in `app.py`).
 
 ## 5. Feature Highlights
 
@@ -272,47 +287,58 @@ in `app.py`).
 
 ## 6. API Reference
 
-**POD scoping, in one place:** almost every endpoint below is scoped by `query_pod_for(user)` -
-a pod-scoped user (anyone except `engine1_exec`) always gets their own POD's data, ignoring any
-`?pod=` they pass; `engine1_exec` gets all three PODS combined unless `?pod=pods1|pods2|pods3` is
-given, in which case it's scoped to just that one. Mutation endpoints (create/update/delete) always
-force the acting user's own POD server-side, never a client-supplied one, and independently verify
-the target row's POD matches before allowing an edit/delete - so no role can affect another POD's
-data even by guessing an ID.
+**POD scoping, in one place:** almost every GET endpoint below is scoped by `query_pod_for(user)` -
+a pod-scoped user always gets their own POD's data, ignoring any `?pod=` they pass; `engine1_exec`
+and `super_admin` (both podless) get all three PODS combined unless `?pod=pods1|pods2|pods3` is
+given, in which case it's scoped to just that one. Mutations (create/update/delete/import) use
+`mutation_pod_for(user, data)` instead: a pod-scoped user's own POD is forced server-side, never a
+client-supplied one; a podless `super_admin` must supply the target POD itself (JSON `pod` field,
+`?pod=`, or a multipart form field, in that priority) or the request 400s - `engine1_exec` never
+reaches a mutation endpoint at all except the shared-taxonomy config PUT. Every mutation also
+independently verifies the target row's POD matches before allowing an edit/delete, so no role can
+affect another POD's data even by guessing an ID.
 
 **Auth** — `POST /api/login` → `{token, role, pod, pod_label, username, full_name}`, `POST /api/logout`
 **Account managers** — `GET /api/account_managers` (any authenticated user; POD-scoped, see above)
-**Deals** — `GET /api/deals?am=&pillar=&stage=&quarter=&pod=`, `POST /api/deals`,
-`PUT /api/deals/<id>`, `DELETE /api/deals/<id>`, `PUT /api/deals/<id>/progress`,
-`PUT /api/deals/<id>/blocker` (mutations require admin or the owning AM, within their own POD).
-Each deal includes `pod` and a display `pod_label`.
-**Users** (admin, own POD only) — `GET/POST /api/users`, `PUT/DELETE /api/users/<id>`. Pod-scoped
-roles only: `admin`, `account_manager`, `management`, `solution`, `project`, `product` - an
-`engine1_exec` account can never be created, promoted to, or managed through this endpoint.
+**Deals** — `GET /api/deals?am=&pillar=&stage=&quarter=&pod=`, `POST /api/deals` (admin/account_manager
+in their own POD, or `super_admin` with an explicit `pod`), `PUT /api/deals/<id>`,
+`DELETE /api/deals/<id>`, `PUT /api/deals/<id>/progress`, `PUT /api/deals/<id>/blocker` (mutations
+require admin, the owning AM, or super_admin). Each deal includes `pod` and a display `pod_label`.
+**Users** — `GET/POST /api/users`, `PUT/DELETE /api/users/<id>`. A POD's own admin is confined to
+that POD and to pod-scoped roles (`admin`, `account_manager`, `management`, `solution`, `project`,
+`product`) - it can never create, promote to, or manage an `engine1_exec`/`super_admin` account.
+`super_admin` manages users in **any** POD (via a `pod` field in the request body) and is the only
+role that can create/edit another `engine1_exec` or `super_admin` account, or move a user's POD.
 **Team Tasks** — `GET/POST /api/deals/<id>/tasks` (list: any authenticated role, POD-checked against
-the deal; create: admin/owning AM choosing any team, or a cross-functional role creating only under
-its own team — the `team` field is ignored and forced server-side for them; both may set the
-starting `status` and an optional `due` date at creation time), `PUT/DELETE /api/tasks/<id>`
+the deal; create: admin/owning AM/super_admin choosing any team, or a cross-functional role creating
+only under its own team — the `team` field is ignored and forced server-side for them; both may set
+the starting `status` and an optional `due` date at creation time), `PUT/DELETE /api/tasks/<id>`
 (cross-functional roles may edit/delete only their own team's tasks in their own POD, and can change
-`text`/`status`/`note`/`due` but never `team`; admin/owning AM can edit or delete any field on any
-task on their deals), `GET /api/tasks?team=&status=&scope=&pod=` (cross-opportunity list, any
-authenticated role — by default a cross-functional role only ever sees its own team's tasks; pass
-`scope=all` to see every team's tasks instead, which is what the shared Weekly Meeting board uses).
-**Config** — `GET /api/config?pod=` (all authenticated roles), `PUT /api/config` (admin: their own
-POD's `target_amount`/`am_targets`/`am_achievements`/`am_recurring`/`current_achievement`/
-`recurring_revenue` only; engine1_exec: the shared `strategic_pillars`/`stages`/`max_login_logs`
-only — each role's PUT silently ignores fields it doesn't own). The GET response merges the shared
-taxonomy with either one POD's figures (`pod`/`pod_label` reflect which) or, for engine1_exec with
-no `?pod=`, all three summed plus a `pods_breakdown` array of each POD's own figures.
+`text`/`status`/`note`/`due` but never `team`; admin/owning AM/super_admin can edit or delete any
+field on any task on their deals), `GET /api/tasks?team=&status=&scope=&pod=` (cross-opportunity
+list, any authenticated role — by default a cross-functional role only ever sees its own team's
+tasks; pass `scope=all` to see every team's tasks instead, which is what the shared Weekly Meeting
+board uses).
+**Config** — `GET /api/config?pod=` (all authenticated roles), `PUT /api/config`: admin edits their
+own POD's `target_amount`/`am_targets`/`am_achievements`/`am_recurring`/`current_achievement`/
+`recurring_revenue` only; `engine1_exec` edits only the shared `strategic_pillars`/`stages`/
+`max_login_logs`; `super_admin` can send either or both in the same request (a chosen POD's money
+fields need that POD resolved via `mutation_pod_for`, taxonomy fields don't) - every role's PUT
+silently ignores fields it doesn't own. The GET response merges the shared taxonomy with either one
+POD's figures (`pod`/`pod_label` reflect which) or, for a podless role with no `?pod=`, all three
+summed plus a `pods_breakdown` array of each POD's own figures.
 Deals carry `estimated_value` (TCV), `revenue_2026`, and the two Action Plan milestones
 `expected_po_date` / `expected_revenue_date`.
-**Reports** — `GET /api/export/pdf`, `GET /api/performance/export_pdf?am=` (both POD-scoped;
-engine1_exec with no POD selected gets an all-PODS combined report where that makes sense, or an
+**Data Backup** — `GET /api/export/xlsx`, `POST /api/import/xlsx` (admin or super_admin; a podless
+super_admin must resolve a POD via `mutation_pod_for` first or gets a 400) - both POD-scoped, same
+guarantee as deals: an ID or username collision with another POD is treated as new, never merged in.
+**Reports** — `GET /api/export/pdf`, `GET /api/performance/export_pdf?am=` (both POD-scoped; a
+podless role with no POD selected gets an all-PODS combined report where that makes sense, or an
 error where a single POD must be chosen, e.g. the performance PDF).
-**Login Logs** (admin, own POD only) — `GET /api/login_logs`, `GET /api/login_logs/export_xlsx`.
-The shared `max_login_logs` setting (default 100, range 10–2000, engine1_exec-managed) controls how
-many of the most recent logs are kept **per POD** — one POD's sign-in volume can never crowd out
-another's history.
+**Login Logs** — `GET /api/login_logs`, `GET /api/login_logs/export_xlsx` (admin: own POD only;
+super_admin: any POD, or all combined). The shared `max_login_logs` setting (default 100, range
+10–2000, managed by `engine1_exec`/`super_admin`) controls how many of the most recent logs are kept
+**per POD** — one POD's sign-in volume can never crowd out another's history.
 
 All endpoints except `/api/login` require an `Authorization: Bearer <token>` header.
 

@@ -750,7 +750,7 @@
               <button id="addUserBtn" class="btn-primary text-xs px-3 py-1.5 rounded-lg"><i class="fa-solid fa-user-plus mr-1"></i>Add User</button>
             </div>
             <div class="overflow-x-auto"><table class="w-full text-sm">
-              <thead style="color:var(--text-muted)"><tr class="text-xs uppercase" style="border-bottom:1px solid var(--border)"><th class="text-left py-2">Username</th><th class="text-left py-2">Full name</th><th class="text-left py-2">Role</th><th class="text-right py-2">Actions</th></tr></thead>
+              <thead style="color:var(--text-muted)"><tr class="text-xs uppercase" style="border-bottom:1px solid var(--border)"><th class="text-left py-2">Username</th><th class="text-left py-2">Full name</th><th class="text-left py-2">Role</th><th id="usersPodHeader" class="text-left py-2" style="display:none">POD</th><th class="text-right py-2">Actions</th></tr></thead>
               <tbody id="usersTableBody"></tbody>
             </table></div>
           </div>
@@ -1106,6 +1106,7 @@
       <div><label class="block text-xs mb-1" style="color:var(--text-muted)">Full name (AM display name)</label><input id="userFullName" type="text" class="field w-full px-3 py-2 text-sm"></div>
       <div><label class="block text-xs mb-1" style="color:var(--text-muted)">Password <span id="userPasswordHint" style="color:var(--text-faint)"></span></label><input id="userPassword" type="password" class="field w-full px-3 py-2 text-sm"></div>
       <div><label class="block text-xs mb-1" style="color:var(--text-muted)">Role</label><select id="userRole" class="field w-full px-3 py-2 text-sm"><option value="admin">Admin</option><option value="account_manager">Account Manager</option><option value="management">Management</option><option value="solution">Solution Team</option><option value="project">Project Team</option><option value="product">Product Team</option></select><p class="text-[10px] mt-1" style="color:var(--text-faint)">Solution / Project / Product can only update the status &amp; note on their own team's tasks in the Team Tasks tab &mdash; nothing else on an opportunity.</p></div>
+      <div id="userPodWrap" style="display:none"><label class="block text-xs mb-1" style="color:var(--text-muted)">POD</label><select id="userPod" class="field w-full px-3 py-2 text-sm"><option value="pods1">PODS 1</option><option value="pods2">PODS 2</option><option value="pods3">PODS 3</option></select><p class="text-[10px] mt-1" style="color:var(--text-faint)">Not shown/needed for Engine1 Executive or Super Admin roles, which belong to no single POD.</p></div>
       <div class="flex justify-end gap-2 pt-2"><button type="button" data-close-modal="userModal" class="text-sm px-4 py-2 rounded-lg" style="border:1px solid var(--border);color:var(--text-muted)">Cancel</button><button type="submit" class="btn-primary text-sm px-4 py-2 rounded-lg">Save</button></div>
     </form>
   </div>
@@ -1133,6 +1134,12 @@
 <script>
 /* ================= STATE ================= */
 const CROSS_FUNCTIONAL_ROLES_JS = ['solution','project','product'];
+// Roles with no POD of their own: engine1_exec (read-only across all PODS) and
+// super_admin (full read/write anywhere, acting on whichever POD is selected).
+const PODLESS_ROLES_JS = ['engine1_exec','super_admin'];
+const PODS_LIST = ['pods1','pods2','pods3'];
+const POD_LABELS_JS = {pods1:'PODS 1', pods2:'PODS 2', pods3:'PODS 3'};
+function appendPodToFormData(fd){ if(ROLE==='super_admin' && ENGINE1_POD_FILTER) fd.append('pod', ENGINE1_POD_FILTER); return fd; }
 let TOKEN = localStorage.getItem('dt_token');
 let ROLE = localStorage.getItem('dt_role');
 let USERNAME = localStorage.getItem('dt_username');
@@ -1273,7 +1280,7 @@ function fmtThousands(v){ const n=String(v==null?'':v).replace(/[^\d]/g,''); ret
 function parseThousands(v){ const n=String(v==null?'':v).replace(/[^\d]/g,''); return n ? parseInt(n,10) : 0; }
 function attachMoney(el){ if(!el||el._money) return; el._money=true; el.addEventListener('input',()=>{ const s=el.selectionStart, before=el.value.length; el.value=fmtThousands(el.value); const after=el.value.length; try{ el.selectionStart=el.selectionEnd=Math.max(0,(s||0)+(after-before)); }catch(e){} }); }
 function showToast(msg, err=false){ const t=document.getElementById('toast'); t.textContent=msg; t.style.background = err?'var(--danger)':'#323639'; t.classList.remove('hidden'); setTimeout(()=>t.classList.add('hidden'),2800); }
-function canEditDeal(d){ return ROLE==='admin' || (ROLE==='account_manager' && d.assigned_am===FULLNAME); }
+function canEditDeal(d){ return ROLE==='super_admin' || ROLE==='admin' || (ROLE==='account_manager' && d.assigned_am===FULLNAME); }
 function initials(name){ return (name||'?').split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase(); }
 
 async function api(path, opts={}) {
@@ -1322,7 +1329,7 @@ async function enterApp(){
   document.getElementById('topUserRole').textContent = ROLE.replace('_',' ');
   document.getElementById('avatar').textContent = initials(FULLNAME);
   const podBadge=document.getElementById('podBadge'), podFilterSel=document.getElementById('podFilter');
-  if(ROLE==='engine1_exec'){
+  if(PODLESS_ROLES_JS.includes(ROLE)){
     podBadge.style.display='none';
     podFilterSel.style.display='';
     podFilterSel.value=ENGINE1_POD_FILTER;
@@ -1331,16 +1338,16 @@ async function enterApp(){
     podBadge.style.display='';
     podBadge.textContent=POD_LABEL||'';
   }
-  document.getElementById('settingsNavBtn').style.display = ROLE==='admin' ? '' : 'none';
-  document.getElementById('configNavBtn').style.display = ROLE==='engine1_exec' ? '' : 'none';
-  document.getElementById('loginLogsNavBtn').style.display = ROLE==='admin' ? '' : 'none';
-  document.getElementById('mgmtNavBtn').style.display = (ROLE==='admin'||ROLE==='management'||ROLE==='engine1_exec') ? '' : 'none';
+  document.getElementById('settingsNavBtn').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('configNavBtn').style.display = (ROLE==='engine1_exec'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('loginLogsNavBtn').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('mgmtNavBtn').style.display = (ROLE==='admin'||ROLE==='management'||ROLE==='engine1_exec'||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('weeklyMeetingNavBtn').style.display = ''; // visible to every role
-  document.getElementById('quickSettingsBtn').style.display = ROLE==='admin' ? '' : 'none';
-  document.getElementById('quickConfigBtn').style.display = ROLE==='engine1_exec' ? '' : 'none';
-  document.getElementById('perfUploadWrap').style.display = ROLE==='admin' ? '' : 'none';
-  document.getElementById('amTargetsImportWrap').style.display = ROLE==='admin' ? '' : 'none';
-  document.getElementById('addDealBtn').style.display = (ROLE==='admin'||ROLE==='account_manager') ? '' : 'none';
+  document.getElementById('quickSettingsBtn').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('quickConfigBtn').style.display = (ROLE==='engine1_exec'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('perfUploadWrap').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('amTargetsImportWrap').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('addDealBtn').style.display = (ROLE==='admin'||ROLE==='account_manager'||ROLE==='super_admin') ? '' : 'none';
   // Solution / Project / Product can see every opportunity (read-only, for context) and
   // their own task inbox, but not Calendar / Analytics / Performance / any edit control.
   const isCrossFunctional = CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE);
@@ -1365,17 +1372,17 @@ async function enterApp(){
   }
   await loadDeals();
   await loadPerformance();
-  if(ROLE==='admin') await loadUsers();
+  if(ROLE==='admin'||ROLE==='super_admin') await loadUsers();
   // Management and engine1_exec land on the executive briefing; everyone else on the tracker
-  switchTab((ROLE==='management'||ROLE==='engine1_exec') ? 'management' : CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE) ? 'myteamtasks' : 'tracker');
+  switchTab((ROLE==='management'||PODLESS_ROLES_JS.includes(ROLE)) ? 'management' : CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE) ? 'myteamtasks' : 'tracker');
 }
 
 /* ================= TABS ================= */
 document.querySelectorAll('.nav-link').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
 function switchTab(tab){
-  if((tab==='settings'||tab==='loginlogs') && ROLE!=='admin') return;
-  if(tab==='configuration' && ROLE!=='engine1_exec') return;
-  if(tab==='management' && !(ROLE==='admin'||ROLE==='management'||ROLE==='engine1_exec')) return;
+  if((tab==='settings'||tab==='loginlogs') && !(ROLE==='admin'||ROLE==='super_admin')) return;
+  if(tab==='configuration' && !(ROLE==='engine1_exec'||ROLE==='super_admin')) return;
+  if(tab==='management' && !(ROLE==='admin'||ROLE==='management'||PODLESS_ROLES_JS.includes(ROLE))) return;
   if(tab==='myteamtasks' && !CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE)) return;
   if(['calendar','analytics','performance'].includes(tab) && CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE)) return;
   document.querySelectorAll('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
@@ -1396,7 +1403,7 @@ function switchTab(tab){
 }
 
 /* ================= CONFIG / AMS ================= */
-function podQueryParam(){ return (ROLE==='engine1_exec' && ENGINE1_POD_FILTER) ? '?pod='+encodeURIComponent(ENGINE1_POD_FILTER) : ''; }
+function podQueryParam(){ return (PODLESS_ROLES_JS.includes(ROLE) && ENGINE1_POD_FILTER) ? '?pod='+encodeURIComponent(ENGINE1_POD_FILTER) : ''; }
 async function loadConfig(){ CONFIG = await api('/api/config'+podQueryParam()); populateSelectors(); updateMetrics(); }
 async function loadAMs(){ try { AMS = await api('/api/account_managers'+podQueryParam()); } catch(e){ AMS=[]; } populateSelectors(); }
 document.getElementById('podFilter').addEventListener('change', async e=>{
@@ -1483,7 +1490,7 @@ async function loadDeals(){
   const am=document.getElementById('filterAM').value; if(am)p.set('am',am);
   const pl=document.getElementById('filterPillar').value; if(pl)p.set('pillar',pl);
   const st=document.getElementById('filterStage').value; if(st)p.set('stage',st);
-  const podQ=(ROLE==='engine1_exec' && ENGINE1_POD_FILTER) ? ENGINE1_POD_FILTER : '';
+  const podQ=(PODLESS_ROLES_JS.includes(ROLE) && ENGINE1_POD_FILTER) ? ENGINE1_POD_FILTER : '';
   if(podQ) p.set('pod',podQ);
   DEALS = await api('/api/deals?'+p.toString());
   if(am||pl||st){
@@ -1534,7 +1541,7 @@ function renderDealsTable(){
     tr.innerHTML=`
       <td class="px-4 py-3 font-medium" style="color:var(--text)">${escapeHtml(deal.deal_name)}${deal.is_blocked?' <i class="fa-solid fa-triangle-exclamation ml-1" style="color:var(--danger)"></i>':''}</td>
       <td class="px-4 py-3" style="color:var(--text-muted)">${escapeHtml(deal.customer)}</td>
-      <td class="px-4 py-3">${ROLE==='engine1_exec'&&!ENGINE1_POD_FILTER&&deal.pod_label?`<span class="chip mr-1" style="color:var(--primary);border-color:var(--primary)">${escapeHtml(deal.pod_label)}</span>`:''}<span class="chip" style="color:var(--text-muted)">${escapeHtml(deal.assigned_am.split(' ')[0])}</span></td>
+      <td class="px-4 py-3">${PODLESS_ROLES_JS.includes(ROLE)&&!ENGINE1_POD_FILTER&&deal.pod_label?`<span class="chip mr-1" style="color:var(--primary);border-color:var(--primary)">${escapeHtml(deal.pod_label)}</span>`:''}<span class="chip" style="color:var(--text-muted)">${escapeHtml(deal.assigned_am.split(' ')[0])}</span></td>
       <td class="px-4 py-3" style="color:var(--text-muted)">${escapeHtml(deal.strategic_pillar)}</td>
       <td class="px-4 py-3 text-right font-medium" style="color:var(--text)">${fmtIDR(deal.estimated_value)}</td>
       <td class="px-4 py-3 text-right font-medium" style="color:var(--primary)">${fmtIDR(deal.revenue_2026)}</td>
@@ -1605,7 +1612,7 @@ function openDetail(id){
       ${detailStat('Stage', `<span class="stage-dot" style="background:${stageColor(d.stage)}"></span> ${d.stage}`)}
       ${detailStat('Target', escapeHtml(d.target_quarter)||'–')}
       ${detailStat('Pillar', escapeHtml(d.strategic_pillar))}
-      ${ROLE==='engine1_exec'?detailStat('POD', escapeHtml(d.pod_label||'')):''}
+      ${PODLESS_ROLES_JS.includes(ROLE)?detailStat('POD', escapeHtml(d.pod_label||'')):''}
     </div>
     <div class="mb-4">
       <div class="flex justify-between text-xs mb-1" style="color:var(--text-muted)"><span>Progress</span><span>${d.progress}%</span></div>
@@ -1659,6 +1666,10 @@ function openDealModal(id){
   const d=id?DEALS.find(x=>x.id===id):null;
   const restricted = CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE);
   if(restricted && !d) return; // cross-functional roles can only add tasks to an existing opportunity
+  if(!d && ROLE==='super_admin' && !ENGINE1_POD_FILTER){
+    showToast('Pick a POD from the header selector first, then Add Opportunity', true);
+    return;
+  }
 
   dealModalRestricted = restricted;
   dealModalDirty = false;
@@ -1981,7 +1992,7 @@ let wmStatusFilter=null;
 async function renderWeeklyMeeting(){
   const team=document.getElementById('wmTeamFilter').value;
   const params=new URLSearchParams({scope:'all'}); if(team) params.set('team',team);
-  if(ROLE==='engine1_exec' && ENGINE1_POD_FILTER) params.set('pod',ENGINE1_POD_FILTER);
+  if(PODLESS_ROLES_JS.includes(ROLE) && ENGINE1_POD_FILTER) params.set('pod',ENGINE1_POD_FILTER);
   let tasks=[];
   try{ tasks=await api('/api/tasks?'+params.toString()); }catch(err){ showToast(err.message,true); }
   document.getElementById('wmKpiBlocked').textContent=tasks.filter(t=>t.status==='blocked').length;
@@ -2017,7 +2028,7 @@ async function renderWeeklyMeeting(){
         ${t.due?`<span class="chip" style="color:${overdue?'var(--danger)':'var(--text-muted)'};border-color:${overdue?'var(--danger)':'var(--border)'}">${overdue?'⚠ ':''}${t.due}</span>`:''}
       </div>
       <div class="flex items-center gap-2 text-xs" style="color:var(--text-muted)">
-        ${ROLE==='engine1_exec'&&t.pod_label?`<span class="chip" style="color:var(--primary);border-color:var(--primary)">${escapeHtml(t.pod_label)}</span>`:''}
+        ${PODLESS_ROLES_JS.includes(ROLE)&&t.pod_label?`<span class="chip" style="color:var(--primary);border-color:var(--primary)">${escapeHtml(t.pod_label)}</span>`:''}
         <span class="font-medium" style="color:var(--text)">${escapeHtml(t.deal_name)}</span>
         <span>${escapeHtml(t.customer||'')}</span>
         <span class="chip" style="color:var(--text-muted)">${escapeHtml((t.assigned_am||'').split(' ')[0])}</span>
@@ -2125,6 +2136,9 @@ function renderNextActionsDraft(){
 }
 function buildDealPayload(){
   return {
+    // Only meaningful when creating (super_admin has no home POD of its own); the
+    // server ignores this field on updates and on every other role's requests.
+    pod: ROLE==='super_admin' ? ENGINE1_POD_FILTER : undefined,
     deal_name:document.getElementById('dealName').value.trim(),
     customer:document.getElementById('dealCustomer').value.trim(),
     assigned_am:document.getElementById('dealAM').value,
@@ -2382,7 +2396,7 @@ document.getElementById('perfImportBtn').addEventListener('click',()=>{
   if(!f){ showToast('Choose the monthly .xlsx first',true); return; }
   openConfirm(`Upload "${f.name}" as the current performance snapshot? Previous snapshots are kept (last 12).`, async()=>{
     try{
-      const fd=new FormData(); fd.append('file',f);
+      const fd=appendPodToFormData(new FormData()); fd.append('file',f);
       const lbl=document.getElementById('perfLabel').value.trim(); if(lbl) fd.append('label',lbl);
       const res=await fetch('/api/performance/import',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:fd});
       const data=await res.json();
@@ -3141,7 +3155,7 @@ document.getElementById('amTargetsImportBtn').addEventListener('click',()=>{
   if(!f){ showToast('Choose the monthly .xlsx first',true); return; }
   openConfirm(`Update Target / YTD Actual / Recurring FY26 from "${f.name}"? Only account managers matched in the file are changed — everyone else's figures are left as-is.`, async()=>{
     try{
-      const fd=new FormData(); fd.append('file',f);
+      const fd=appendPodToFormData(new FormData()); fd.append('file',f);
       const res=await fetch('/api/config/am_targets/import',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:fd});
       const data=await res.json();
       if(!res.ok) throw new Error(data.error||'Import failed');
@@ -3185,7 +3199,7 @@ document.getElementById('addPillarBtn').addEventListener('click',async()=>{ cons
 document.getElementById('exportXlsxBtn').addEventListener('click',async()=>{
   try{
     showToast('Building Excel backup...');
-    const res=await fetch('/api/export/xlsx',{headers:{'Authorization':'Bearer '+TOKEN}});
+    const res=await fetch('/api/export/xlsx'+podQueryParam(),{headers:{'Authorization':'Bearer '+TOKEN}});
     if(!res.ok){ const b=await res.json().catch(()=>({})); throw new Error(b.error||'Export failed'); }
     const blob=await res.blob(), url=URL.createObjectURL(blob);
     const a=document.createElement('a'); a.href=url;
@@ -3205,14 +3219,14 @@ document.getElementById('importXlsxBtn').addEventListener('click',()=>{
     const out=document.getElementById('importResult');
     try{
       out.textContent='Importing...';
-      const fd=new FormData(); fd.append('file',f); if(replace) fd.append('replace_all','true');
+      const fd=appendPodToFormData(new FormData()); fd.append('file',f); if(replace) fd.append('replace_all','true');
       const res=await fetch('/api/import/xlsx',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:fd});
       const data=await res.json();
       if(!res.ok) throw new Error(data.error||'Import failed');
       const s=data.summary;
       out.innerHTML=`<span style="color:var(--success)">Imported.</span> ${s.updated} updated, ${s.created} created, ${s.deleted} deleted, ${s.users_created} new user(s)${s.config_updated?', configuration updated':''}.`;
       showToast('Import complete');
-      await loadConfig(); await loadAMs(); await loadDeals(); if(ROLE==='admin') await loadUsers();
+      await loadConfig(); await loadAMs(); await loadDeals(); if(ROLE==='admin'||ROLE==='super_admin') await loadUsers();
       renderSettings();
     }catch(err){ out.innerHTML=`<span style="color:var(--danger)">${escapeHtml(err.message)}</span>`; showToast(err.message,true); }
   });
@@ -3223,17 +3237,23 @@ document.getElementById('saveTargetBtn').addEventListener('click',async()=>{
   CONFIG.recurring_revenue=parseThousands(document.getElementById('settingsRecurring').value);
   await persistConfig(); showToast('Target & progress saved');
 });
-async function persistConfig(){ try { CONFIG=await api('/api/config',{method:'PUT',body:JSON.stringify(CONFIG)}); populateSelectors(); updateMetrics(); } catch(err){ showToast(err.message,true); } }
+async function persistConfig(){ try { CONFIG=await api('/api/config'+podQueryParam(),{method:'PUT',body:JSON.stringify(CONFIG)}); populateSelectors(); updateMetrics(); } catch(err){ showToast(err.message,true); } }
 
 /* ================= USERS ================= */
-async function loadUsers(){ USERS=await api('/api/users'); }
+async function loadUsers(){ USERS=await api('/api/users'+podQueryParam()); }
 function renderUsersTable(){
+  document.getElementById('usersPodHeader').style.display = ROLE==='super_admin' ? '' : 'none';
   const tbody=document.getElementById('usersTableBody');
-  tbody.innerHTML=USERS.map(u=>`<tr style="border-top:1px solid var(--border)"><td class="py-2.5 font-medium" style="color:var(--text)">${escapeHtml(u.username)}</td><td class="py-2.5" style="color:var(--text-muted)">${escapeHtml(u.full_name||'')}</td><td class="py-2.5"><span class="chip" style="color:var(--text-muted)">${u.role.replace('_',' ')}</span></td><td class="py-2.5 text-right"><button class="eu-btn" data-id="${u.id}" style="color:var(--primary)"><i class="fa-solid fa-pen text-xs"></i></button><button class="du-btn ml-3" data-id="${u.id}" style="color:var(--danger)"><i class="fa-solid fa-trash text-xs"></i></button></td></tr>`).join('');
+  tbody.innerHTML=USERS.map(u=>`<tr style="border-top:1px solid var(--border)"><td class="py-2.5 font-medium" style="color:var(--text)">${escapeHtml(u.username)}</td><td class="py-2.5" style="color:var(--text-muted)">${escapeHtml(u.full_name||'')}</td><td class="py-2.5"><span class="chip" style="color:var(--text-muted)">${u.role.replace('_',' ')}</span></td>${ROLE==='super_admin'?`<td class="py-2.5"><span class="chip" style="color:var(--primary);border-color:var(--primary)">${escapeHtml(POD_LABELS_JS[u.pod]||'All PODS')}</span></td>`:''}<td class="py-2.5 text-right"><button class="eu-btn" data-id="${u.id}" style="color:var(--primary)"><i class="fa-solid fa-pen text-xs"></i></button><button class="du-btn ml-3" data-id="${u.id}" style="color:var(--danger)"><i class="fa-solid fa-trash text-xs"></i></button></td></tr>`).join('');
   tbody.querySelectorAll('.eu-btn').forEach(b=>b.addEventListener('click',()=>openUserModal(parseInt(b.dataset.id))));
   tbody.querySelectorAll('.du-btn').forEach(b=>b.addEventListener('click',()=>confirmDeleteUser(parseInt(b.dataset.id))));
 }
 document.getElementById('addUserBtn').addEventListener('click',()=>openUserModal(null));
+function refreshUserPodWrap(){
+  const roleSel=document.getElementById('userRole'), wrap=document.getElementById('userPodWrap');
+  if(ROLE!=='super_admin'){ wrap.style.display='none'; return; }
+  wrap.style.display = PODLESS_ROLES_JS.includes(roleSel.value) ? 'none' : '';
+}
 function openUserModal(id){
   const u=id?USERS.find(x=>x.id===id):null;
   document.getElementById('userModalTitle').textContent=u?'Edit User':'Add User';
@@ -3242,9 +3262,18 @@ function openUserModal(id){
   document.getElementById('userFullName').value=u?(u.full_name||''):'';
   document.getElementById('userPassword').value='';
   document.getElementById('userPasswordHint').textContent=u?'(blank = keep current)':'';
-  document.getElementById('userRole').value=u?u.role:'account_manager';
+  const roleSel=document.getElementById('userRole');
+  if(ROLE==='super_admin' && !roleSel.querySelector('option[value="engine1_exec"]')){
+    roleSel.insertAdjacentHTML('beforeend', '<option value="engine1_exec">Engine 1 Executive</option><option value="super_admin">Super Admin</option>');
+  }
+  roleSel.value=u?u.role:'account_manager';
+  if(ROLE==='super_admin'){
+    document.getElementById('userPod').value = (u && PODS_LIST.includes(u.pod)) ? u.pod : (ENGINE1_POD_FILTER || 'pods1');
+  }
+  refreshUserPodWrap();
   openModal('userModal');
 }
+document.getElementById('userRole').addEventListener('change', refreshUserPodWrap);
 document.getElementById('userForm').addEventListener('submit',async e=>{
   e.preventDefault();
   const id=document.getElementById('userId').value;
@@ -3252,9 +3281,10 @@ document.getElementById('userForm').addEventListener('submit',async e=>{
   const full_name=document.getElementById('userFullName').value.trim();
   const password=document.getElementById('userPassword').value;
   const role=document.getElementById('userRole').value;
+  const pod = (ROLE==='super_admin' && !PODLESS_ROLES_JS.includes(role)) ? document.getElementById('userPod').value : undefined;
   try {
-    if(id){ const p={role,full_name}; if(password)p.password=password; await api(`/api/users/${id}`,{method:'PUT',body:JSON.stringify(p)}); showToast('User updated'); }
-    else { if(!password){ showToast('Password required',true); return; } await api('/api/users',{method:'POST',body:JSON.stringify({username,password,role,full_name})}); showToast('User created'); }
+    if(id){ const p={role,full_name}; if(password)p.password=password; if(pod)p.pod=pod; await api(`/api/users/${id}`,{method:'PUT',body:JSON.stringify(p)}); showToast('User updated'); }
+    else { if(!password){ showToast('Password required',true); return; } const p={username,password,role,full_name}; if(pod)p.pod=pod; await api('/api/users',{method:'POST',body:JSON.stringify(p)}); showToast('User created'); }
     closeModal('userModal'); await loadUsers(); await loadAMs(); renderUsersTable();
   } catch(err){ showToast(err.message,true); }
 });
@@ -3266,6 +3296,7 @@ document.getElementById('exportTrackerBtn').addEventListener('click',async()=>{
     showToast('Building Tracker sheet...');
     const p=new URLSearchParams();
     const am=analyticsFilters.assigned_am||''; if(am) p.set('am',am);
+    if(ROLE==='super_admin' && ENGINE1_POD_FILTER) p.set('pod',ENGINE1_POD_FILTER);
     const res=await fetch('/api/export/tracker_xlsx?'+p.toString(),{headers:{'Authorization':'Bearer '+TOKEN}});
     if(!res.ok){ const b=await res.json().catch(()=>({})); throw new Error(b.error||'Export failed'); }
     const blob=await res.blob(), url=URL.createObjectURL(blob);
@@ -3280,7 +3311,7 @@ document.getElementById('exportTrackerBtn').addEventListener('click',async()=>{
 document.getElementById('exportPdfBtn').addEventListener('click',async()=>{
   try {
     showToast('Generating PDF...');
-    const res=await fetch('/api/export/pdf',{headers:{'Authorization':'Bearer '+TOKEN}});
+    const res=await fetch('/api/export/pdf'+podQueryParam(),{headers:{'Authorization':'Bearer '+TOKEN}});
     if(!res.ok) throw new Error('Failed to generate report');
     const blob=await res.blob(); const url=URL.createObjectURL(blob);
     const a=document.createElement('a'); a.href=url; a.download=`deal_tracker_report_${new Date().toISOString().split('T')[0]}.pdf`;
@@ -3292,7 +3323,7 @@ document.getElementById('exportPdfBtn').addEventListener('click',async()=>{
 async function renderLoginLogs(){
   document.getElementById('maxLoginLogsInput').value = CONFIG.max_login_logs || 100;
   try{
-    const data = await api('/api/login_logs');
+    const data = await api('/api/login_logs'+podQueryParam());
     const tbody = document.getElementById('loginLogsBody');
     const empty = document.getElementById('loginLogsEmpty');
     document.getElementById('loginLogsCount').textContent = `${data.logs.length} / ${data.max_login_logs} logs`;
@@ -3317,7 +3348,7 @@ document.getElementById('saveMaxLoginLogsBtn').addEventListener('click',async()=
 document.getElementById('exportLoginLogsBtn').addEventListener('click',async()=>{
   try{
     showToast('Building login log export...');
-    const res=await fetch('/api/login_logs/export_xlsx',{headers:{'Authorization':'Bearer '+TOKEN}});
+    const res=await fetch('/api/login_logs/export_xlsx'+podQueryParam(),{headers:{'Authorization':'Bearer '+TOKEN}});
     if(!res.ok){ const b=await res.json().catch(()=>({})); throw new Error(b.error||'Export failed'); }
     const blob=await res.blob(), url=URL.createObjectURL(blob);
     const a=document.createElement('a'); a.href=url;
@@ -3343,17 +3374,17 @@ document.getElementById('perfExportPdfBtn').addEventListener('click',async()=>{
 
 /* ================= COMMAND PALETTE (feature search) ================= */
 const CMD_FEATURES = [
-  {label:'Management View', desc:'Executive briefing — headline, blockers, AM performance & insights', icon:'fa-briefcase', tab:'management', roles:['admin','management','engine1_exec']},
+  {label:'Management View', desc:'Executive briefing — headline, blockers, AM performance & insights', icon:'fa-briefcase', tab:'management', roles:['admin','management','engine1_exec','super_admin']},
   {label:'Tracker', desc:'Search, filter, sort and edit opportunities', icon:'fa-table-cells-large', tab:'tracker'},
   {label:'Calendar', desc:'Week/month view of every scheduled action item', icon:'fa-calendar-days', tab:'calendar'},
   {label:'Pipeline Analytics', desc:'Gap & targets, breakdown, execution framework, strategy, leaderboard', icon:'fa-chart-line', tab:'analytics'},
   {label:'Performance', desc:'Monthly ACH actuals, targets, pipeline cover, churn watch', icon:'fa-gauge-high', tab:'performance'},
-  {label:'Lists & Automation', desc:'Engine-1-wide deal stages & strategic pillars', icon:'fa-list-check', tab:'configuration', roles:['engine1_exec']},
-  {label:'Login Logs', desc:'Sign-in history, retention limit, export', icon:'fa-user-clock', tab:'loginlogs', roles:['admin']},
-  {label:'Settings', desc:'Targets, AM figures, users, data backup & restore', icon:'fa-sliders', tab:'settings', roles:['admin']},
+  {label:'Lists & Automation', desc:'Engine-1-wide deal stages & strategic pillars', icon:'fa-list-check', tab:'configuration', roles:['engine1_exec','super_admin']},
+  {label:'Login Logs', desc:'Sign-in history, retention limit, export', icon:'fa-user-clock', tab:'loginlogs', roles:['admin','super_admin']},
+  {label:'Settings', desc:'Targets, AM figures, users, data backup & restore', icon:'fa-sliders', tab:'settings', roles:['admin','super_admin']},
 ];
 const CMD_ACTIONS = [
-  {label:'Add Opportunity', desc:'Create a new deal', icon:'fa-plus', roles:['admin','account_manager'],
+  {label:'Add Opportunity', desc:'Create a new deal', icon:'fa-plus', roles:['admin','account_manager','super_admin'],
    action:()=>{ switchTab('tracker'); openDealModal(null); }},
   {label:'Export Tracker report (PDF)', desc:'Download the full Tracker PDF report', icon:'fa-file-pdf',
    action:()=>{ switchTab('tracker'); document.getElementById('exportPdfBtn').click(); }},

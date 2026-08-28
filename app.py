@@ -36,13 +36,17 @@ app = Flask(__name__)
 TOKENS = {}
 
 VALID_ROLES = ("admin", "account_manager", "management", "solution", "project", "product",
-               "engine1_exec")
+               "engine1_exec", "super_admin")
 # Cross-functional roles that can only edit the Team Tasks section of an opportunity
 # (never TCV, the execution framework, or any other sales-owned field).
 CROSS_FUNCTIONAL_ROLES = ("solution", "project", "product")
 # Every other role belongs to exactly one POD and only ever sees that POD's data.
-# engine1_exec belongs to none of them (pod is NULL) and gets a read-only view across
-# all three, plus exclusive ownership of the Engine-1-wide Stages/Pillars taxonomy.
+# engine1_exec and super_admin belong to none of them (pod is NULL): engine1_exec gets a
+# read-only view across all three plus exclusive ownership of the Engine-1-wide Stages/
+# Pillars taxonomy; super_admin gets full read/write everywhere in any POD, and is the
+# only role that can create/edit users of any role (including other super_admin or
+# engine1_exec accounts) in any POD.
+PODLESS_ROLES = ("engine1_exec", "super_admin")
 PODS = ("pods1", "pods2", "pods3")
 POD_LABELS = {"pods1": "PODS 1", "pods2": "PODS 2", "pods3": "PODS 3"}
 TASK_STATUSES = ("not_started", "in_progress", "blocked", "needs_discussion", "done")
@@ -314,7 +318,7 @@ def _widen_user_roles(db):
     row = db.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'"
     ).fetchone()
-    if not row or not row["sql"] or "'engine1_exec'" in row["sql"]:
+    if not row or not row["sql"] or "'super_admin'" in row["sql"]:
         return  # table doesn't exist yet, or already migrated
     has_pod = "pod" in {r[1] for r in db.execute("PRAGMA table_info(users)")}
     db.executescript(
@@ -326,12 +330,12 @@ def _widen_user_roles(db):
             password TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN
                 ('admin', 'account_manager', 'management', 'solution', 'project', 'product',
-                 'engine1_exec')),
+                 'engine1_exec', 'super_admin')),
             pod TEXT,
             full_name TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            CHECK ((role = 'engine1_exec' AND pod IS NULL) OR
-                   (role != 'engine1_exec' AND pod IN ('pods1', 'pods2', 'pods3')))
+            CHECK ((role IN ('engine1_exec', 'super_admin') AND pod IS NULL) OR
+                   (role NOT IN ('engine1_exec', 'super_admin') AND pod IN ('pods1', 'pods2', 'pods3')))
         );
         INSERT INTO users (id, username, password, role, {"pod, " if has_pod else ""}full_name, created_at)
             SELECT id, username, password, role, {"pod, " if has_pod else ""}full_name, created_at
@@ -427,6 +431,22 @@ def migrate_db(db):
     )} and "due" not in columns("deal_tasks"):
         db.execute("ALTER TABLE deal_tasks ADD COLUMN due TEXT DEFAULT ''")
 
+    # A database that already existed before super_admin was introduced won't get one
+    # from the empty-table seed path below, so add a bootstrap account here instead -
+    # non-destructive, and skipped entirely once any super_admin account exists (or on a
+    # brand-new database, where the seed path below creates the full seed set instead).
+    user_count = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if user_count > 0 and db.execute(
+        "SELECT COUNT(*) FROM users WHERE role = 'super_admin'"
+    ).fetchone()[0] == 0:
+        username = "super_admin"
+        if db.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone():
+            username = "super_admin2"  # extremely unlikely collision fallback
+        db.execute(
+            "INSERT INTO users (username, password, role, pod, full_name) VALUES (?, ?, ?, ?, ?)",
+            (username, _hash("changeme123"), "super_admin", None, "Super Admin"),
+        )
+
 
 def init_db():
     db = sqlite3.connect(DB_PATH)
@@ -463,12 +483,12 @@ def init_db():
             password TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN
                 ('admin', 'account_manager', 'management', 'solution', 'project', 'product',
-                 'engine1_exec')),
+                 'engine1_exec', 'super_admin')),
             pod TEXT,
             full_name TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            CHECK ((role = 'engine1_exec' AND pod IS NULL) OR
-                   (role != 'engine1_exec' AND pod IN ('pods1', 'pods2', 'pods3')))
+            CHECK ((role IN ('engine1_exec', 'super_admin') AND pod IS NULL) OR
+                   (role NOT IN ('engine1_exec', 'super_admin') AND pod IN ('pods1', 'pods2', 'pods3')))
         );
 
         CREATE TABLE IF NOT EXISTS deal_tasks (
@@ -546,6 +566,7 @@ def init_db():
             ("pods2_admin", "changeme123", "admin", "pods2", "PODS 2 Administrator"),
             ("pods3_admin", "changeme123", "admin", "pods3", "PODS 3 Administrator"),
             ("engine1_exec", "changeme123", "engine1_exec", None, "Engine 1 Executive"),
+            ("super_admin", "changeme123", "super_admin", None, "Super Admin"),
         ]
         for username, password, role, pod, full_name in seed_users:
             db.execute(
@@ -623,16 +644,18 @@ def login_required(roles=None):
 
 
 def deal_visible_to(user, deal_row):
-    """Read access: engine1_exec sees every POD; everyone else only their own."""
-    if user["role"] == "engine1_exec":
+    """Read access: engine1_exec and super_admin see every POD; everyone else only theirs."""
+    if user["role"] in PODLESS_ROLES:
         return True
     return deal_row["pod"] == user.get("pod")
 
 
 def can_edit_deal(user, deal_row):
-    """ADMIN edits anything in their own POD; an AM edits only opportunities assigned
-    to them, also within their own POD. A deal can never be edited across PODS, even
-    by an admin - each POD is a separate walled garden."""
+    """super_admin edits anything, anywhere. ADMIN edits anything in their own POD; an AM
+    edits only opportunities assigned to them, also within their own POD - a deal can
+    never be edited across PODS by anyone except super_admin."""
+    if user["role"] == "super_admin":
+        return True
     if deal_row["pod"] != user.get("pod"):
         return False
     if user["role"] == "admin":
@@ -646,13 +669,31 @@ def query_pod_for(user):
     """Which POD's data a request should be scoped to.
 
     Pod-scoped roles always see only their own POD, regardless of any ?pod= they pass.
-    engine1_exec has no POD of its own: passing a valid ?pod= drills into that one POD,
-    otherwise (the default) it means "all three PODS combined" and callers get None back
-    to signal an unfiltered, cross-POD read."""
-    if user["role"] != "engine1_exec":
+    engine1_exec/super_admin have no POD of their own: passing a valid ?pod= drills into
+    that one POD, otherwise (the default) it means "all three PODS combined" and callers
+    get None back to signal an unfiltered, cross-POD read."""
+    if user["role"] not in PODLESS_ROLES:
         return user.get("pod")
     requested = request.args.get("pod")
     return requested if requested in PODS else None
+
+
+def mutation_pod_for(user, data=None):
+    """The POD a create/import mutation by a podless role (super_admin only - engine1_exec
+    never mutates deal/task/backup data) should act on: an explicit `pod` in the JSON body,
+    else the query string, else a multipart form field. Returns None if none of those gave
+    a valid POD, which callers must treat as a 400 (a podless role can't create/import
+    without saying which POD it's for)."""
+    if user.get("pod"):
+        return user["pod"]
+    if data and data.get("pod") in PODS:
+        return data["pod"]
+    requested = request.args.get("pod")
+    if requested in PODS:
+        return requested
+    if request.form and request.form.get("pod") in PODS:
+        return request.form.get("pod")
+    return None
 
 
 def get_shared_config_row(db):
@@ -810,13 +851,16 @@ def login_log_to_dict(row):
 
 
 @app.route("/api/login_logs", methods=["GET"])
-@login_required(roles=("admin",))
+@login_required(roles=("admin", "super_admin"))
 def get_login_logs():
     db = get_db()
-    rows = db.execute(
-        "SELECT * FROM login_logs WHERE pod = ? ORDER BY login_at DESC, id DESC",
-        (g.current_user["pod"],),
-    ).fetchall()
+    pod = query_pod_for(g.current_user)
+    if pod is not None:
+        rows = db.execute(
+            "SELECT * FROM login_logs WHERE pod = ? ORDER BY login_at DESC, id DESC", (pod,)
+        ).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM login_logs ORDER BY login_at DESC, id DESC").fetchall()
     return jsonify({
         "logs": [login_log_to_dict(r) for r in rows],
         "max_login_logs": current_config(db).get("max_login_logs", 100),
@@ -824,7 +868,7 @@ def get_login_logs():
 
 
 @app.route("/api/login_logs/export_xlsx", methods=["GET"])
-@login_required(roles=("admin",))
+@login_required(roles=("admin", "super_admin"))
 def export_login_logs_xlsx():
     try:
         from openpyxl import Workbook
@@ -834,10 +878,13 @@ def export_login_logs_xlsx():
                                  "Run: pip install --user openpyxl, then reload."}), 500
 
     db = get_db()
-    rows = db.execute(
-        "SELECT * FROM login_logs WHERE pod = ? ORDER BY login_at DESC, id DESC",
-        (g.current_user["pod"],),
-    ).fetchall()
+    pod = query_pod_for(g.current_user)
+    if pod is not None:
+        rows = db.execute(
+            "SELECT * FROM login_logs WHERE pod = ? ORDER BY login_at DESC, id DESC", (pod,)
+        ).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM login_logs ORDER BY login_at DESC, id DESC").fetchall()
 
     wb = Workbook()
     ws = wb.active
@@ -917,10 +964,14 @@ def get_deals():
 
 
 @app.route("/api/deals", methods=["POST"])
-@login_required(roles=("admin", "account_manager"))
+@login_required(roles=("admin", "account_manager", "super_admin"))
 def create_deal():
     data = request.get_json(force=True) or {}
     user = g.current_user
+
+    pod = mutation_pod_for(user, data)
+    if not pod:
+        return jsonify({"error": "pod is required (pods1/pods2/pods3) when creating as super_admin"}), 400
 
     # An AM can only create opportunities assigned to themselves.
     if user["role"] == "account_manager":
@@ -944,8 +995,9 @@ def create_deal():
             next_actions, strategy, proofs, expected_po_date, expected_revenue_date, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
         (
-            # A deal always belongs to its creator's own POD - never client-supplied.
-            user["pod"],
+            # A deal always belongs to its creator's own POD, or the POD a podless
+            # super_admin explicitly picked - never anything else client-supplied.
+            pod,
             data.get("deal_name", "Untitled Opportunity"),
             data.get("customer", ""),
             assigned_am,
@@ -971,7 +1023,7 @@ def create_deal():
 
 
 @app.route("/api/deals/<int:deal_id>", methods=["PUT"])
-@login_required(roles=("admin", "account_manager"))
+@login_required(roles=("admin", "account_manager", "super_admin"))
 def update_deal(deal_id):
     data = request.get_json(force=True) or {}
     user = g.current_user
@@ -1033,7 +1085,7 @@ def update_deal(deal_id):
 
 
 @app.route("/api/deals/<int:deal_id>", methods=["DELETE"])
-@login_required(roles=("admin", "account_manager"))
+@login_required(roles=("admin", "account_manager", "super_admin"))
 def delete_deal(deal_id):
     db = get_db()
     row = db.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)).fetchone()
@@ -1047,7 +1099,7 @@ def delete_deal(deal_id):
 
 
 @app.route("/api/deals/<int:deal_id>/progress", methods=["PUT"])
-@login_required(roles=("admin", "account_manager"))
+@login_required(roles=("admin", "account_manager", "super_admin"))
 def update_progress(deal_id):
     data = request.get_json(force=True) or {}
     progress = max(0, min(100, int(data.get("progress", 0))))
@@ -1067,7 +1119,7 @@ def update_progress(deal_id):
 
 
 @app.route("/api/deals/<int:deal_id>/blocker", methods=["PUT"])
-@login_required(roles=("admin", "account_manager"))
+@login_required(roles=("admin", "account_manager", "super_admin"))
 def update_blocker(deal_id):
     data = request.get_json(force=True) or {}
     db = get_db()
@@ -1133,13 +1185,13 @@ def get_deal_tasks(deal_id):
 
 
 @app.route("/api/deals/<int:deal_id>/tasks", methods=["POST"])
-@login_required(roles=("admin", "account_manager") + CROSS_FUNCTIONAL_ROLES)
+@login_required(roles=("admin", "account_manager", "super_admin") + CROSS_FUNCTIONAL_ROLES)
 def create_deal_task(deal_id):
     data = request.get_json(force=True) or {}
     user = g.current_user
     db = get_db()
     deal_row = db.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)).fetchone()
-    if not deal_row or deal_row["pod"] != user.get("pod"):
+    if not deal_row or not deal_visible_to(user, deal_row):
         return jsonify({"error": "Deal not found"}), 404
 
     if user["role"] in CROSS_FUNCTIONAL_ROLES:
@@ -1205,7 +1257,7 @@ def update_task(task_id):
             note = str(data["note"] or "")
         if "due" in data:
             due = str(data["due"] or "").strip()[:10]
-    elif user["role"] in ("admin", "account_manager"):
+    elif user["role"] in ("admin", "account_manager", "super_admin"):
         deal_row = db.execute("SELECT * FROM deals WHERE id = ?", (row["deal_id"],)).fetchone()
         if not deal_row or not can_edit_deal(user, deal_row):
             return jsonify({"error": "You can only edit tasks on opportunities assigned to you"}), 403
@@ -1249,7 +1301,7 @@ def delete_task(task_id):
     if user["role"] in CROSS_FUNCTIONAL_ROLES:
         if row["team"] != user["role"] or row["pod"] != user.get("pod"):
             return jsonify({"error": "You can only delete your own team's tasks"}), 403
-    elif user["role"] in ("admin", "account_manager"):
+    elif user["role"] in ("admin", "account_manager", "super_admin"):
         deal_row = db.execute("SELECT * FROM deals WHERE id = ?", (row["deal_id"],)).fetchone()
         if not deal_row or not can_edit_deal(user, deal_row):
             return jsonify({"error": "You can only delete tasks on opportunities assigned to you"}), 403
@@ -1298,35 +1350,61 @@ def list_tasks():
 
 
 # --------------------------------------------------------------------------
-# Users API (ADMIN only) - always scoped to the admin's own POD. engine1_exec
-# does not manage users anywhere; a POD's admin can never create, edit, or
-# delete a user in a different POD or an engine1_exec account.
+# Users API - a POD's admin manages only that POD's users, and can never create,
+# edit, or delete a user in a different POD or a podless (engine1_exec/super_admin)
+# account. super_admin has no such limits: it manages users in any POD, and is the
+# only role allowed to create/edit/delete another engine1_exec or super_admin account.
 # --------------------------------------------------------------------------
-POD_USER_ROLES = tuple(r for r in VALID_ROLES if r != "engine1_exec")
+POD_USER_ROLES = tuple(r for r in VALID_ROLES if r not in PODLESS_ROLES)
 
 
 @app.route("/api/users", methods=["GET"])
-@login_required(roles=("admin",))
+@login_required(roles=("admin", "super_admin"))
 def get_users():
     db = get_db()
-    rows = db.execute(
-        "SELECT id, username, role, pod, full_name, created_at FROM users WHERE pod = ? ORDER BY id",
-        (g.current_user["pod"],),
-    ).fetchall()
+    user = g.current_user
+    if user["role"] == "super_admin":
+        pod = request.args.get("pod")
+        if pod in PODS:
+            rows = db.execute(
+                "SELECT id, username, role, pod, full_name, created_at FROM users WHERE pod = ? ORDER BY id",
+                (pod,),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT id, username, role, pod, full_name, created_at FROM users ORDER BY pod, id"
+            ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT id, username, role, pod, full_name, created_at FROM users WHERE pod = ? ORDER BY id",
+            (user["pod"],),
+        ).fetchall()
     return jsonify([dict(r) for r in rows])
 
 
 @app.route("/api/users", methods=["POST"])
-@login_required(roles=("admin",))
+@login_required(roles=("admin", "super_admin"))
 def create_user():
     data = request.get_json(force=True) or {}
     username = data.get("username", "").strip()
     password = data.get("password", "")
     role = data.get("role", "")
     full_name = data.get("full_name", "").strip() or username
+    user = g.current_user
 
-    if not username or not password or role not in POD_USER_ROLES:
-        return jsonify({"error": "username, password and a valid role are required"}), 400
+    if user["role"] == "super_admin":
+        if not username or not password or role not in VALID_ROLES:
+            return jsonify({"error": "username, password and a valid role are required"}), 400
+        if role in PODLESS_ROLES:
+            pod = None
+        else:
+            pod = data.get("pod")
+            if pod not in PODS:
+                return jsonify({"error": "pod is required (pods1/pods2/pods3) for this role"}), 400
+    else:
+        if not username or not password or role not in POD_USER_ROLES:
+            return jsonify({"error": "username, password and a valid role are required"}), 400
+        pod = user["pod"]
 
     db = get_db()
     existing = db.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
@@ -1335,7 +1413,7 @@ def create_user():
 
     cur = db.execute(
         "INSERT INTO users (username, password, role, pod, full_name) VALUES (?, ?, ?, ?, ?)",
-        (username, _hash(password), role, g.current_user["pod"], full_name),
+        (username, _hash(password), role, pod, full_name),
     )
     db.commit()
     row = db.execute(
@@ -1346,17 +1424,31 @@ def create_user():
 
 
 @app.route("/api/users/<int:user_id>", methods=["PUT"])
-@login_required(roles=("admin",))
+@login_required(roles=("admin", "super_admin"))
 def update_user(user_id):
     data = request.get_json(force=True) or {}
     db = get_db()
+    user = g.current_user
     row = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if not row or row["pod"] != g.current_user["pod"]:
+    if not row:
+        return jsonify({"error": "User not found"}), 404
+    if user["role"] != "super_admin" and row["pod"] != user["pod"]:
         return jsonify({"error": "User not found"}), 404
 
     role = data.get("role", row["role"])
-    if role not in POD_USER_ROLES:
-        return jsonify({"error": "Invalid role"}), 400
+    if user["role"] == "super_admin":
+        if role not in VALID_ROLES:
+            return jsonify({"error": "Invalid role"}), 400
+        if role in PODLESS_ROLES:
+            pod = None
+        else:
+            pod = data.get("pod", row["pod"]) if row["pod"] in PODS else data.get("pod")
+            if pod not in PODS:
+                return jsonify({"error": "pod is required (pods1/pods2/pods3) for this role"}), 400
+    else:
+        if role not in POD_USER_ROLES:
+            return jsonify({"error": "Invalid role"}), 400
+        pod = row["pod"]  # a POD's own admin can never move a user to another POD
 
     full_name = data.get("full_name", row["full_name"])
     password_hash = row["password"]
@@ -1364,8 +1456,8 @@ def update_user(user_id):
         password_hash = _hash(data["password"])
 
     db.execute(
-        "UPDATE users SET role = ?, full_name = ?, password = ? WHERE id = ?",
-        (role, full_name, password_hash, user_id),
+        "UPDATE users SET role = ?, pod = ?, full_name = ?, password = ? WHERE id = ?",
+        (role, pod, full_name, password_hash, user_id),
     )
     db.commit()
     row = db.execute(
@@ -1376,13 +1468,16 @@ def update_user(user_id):
 
 
 @app.route("/api/users/<int:user_id>", methods=["DELETE"])
-@login_required(roles=("admin",))
+@login_required(roles=("admin", "super_admin"))
 def delete_user(user_id):
     if g.current_user["user_id"] == user_id:
         return jsonify({"error": "Cannot delete your own account while logged in"}), 400
     db = get_db()
+    user = g.current_user
     row = db.execute("SELECT pod FROM users WHERE id = ?", (user_id,)).fetchone()
-    if not row or row["pod"] != g.current_user["pod"]:
+    if not row:
+        return jsonify({"error": "User not found"}), 404
+    if user["role"] != "super_admin" and row["pod"] != user["pod"]:
         return jsonify({"error": "User not found"}), 404
     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
     db.commit()
@@ -1464,38 +1559,27 @@ def get_config():
     return jsonify(resolve_config_for(get_db(), g.current_user))
 
 
-@app.route("/api/config", methods=["PUT"])
-@login_required(roles=("admin", "engine1_exec"))
-def update_config():
-    data = request.get_json(force=True) or {}
-    db = get_db()
-    user = g.current_user
+def _update_shared_taxonomy(db, data):
+    """engine1_exec/super_admin only: the Engine-1-wide Stages/Pillars/log-retention row."""
+    row = get_shared_config_row(db)
+    current = config_to_dict(row)
+    strategic_pillars = data.get("strategic_pillars", current["strategic_pillars"])
+    stages = data.get("stages", current["stages"]) or list(DEFAULT_STAGES)
+    squads = data.get("squads", current["squads"])
+    max_login_logs = int(data.get("max_login_logs", current["max_login_logs"]) or 100)
+    max_login_logs = max(10, min(max_login_logs, 2000))
+    db.execute(
+        """UPDATE config SET strategic_pillars = ?, squads = ?, stages = ?,
+           max_login_logs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+        (json.dumps(strategic_pillars), json.dumps(squads), json.dumps(stages),
+         max_login_logs, row["id"]),
+    )
+    trim_login_logs(db, max_login_logs)
 
-    if user["role"] == "engine1_exec":
-        # Engine1 exec owns only the Engine-1-wide shared taxonomy - never any POD's
-        # own target/achievement figures.
-        row = get_shared_config_row(db)
-        current = config_to_dict(row)
-        strategic_pillars = data.get("strategic_pillars", current["strategic_pillars"])
-        stages = data.get("stages", current["stages"]) or list(DEFAULT_STAGES)
-        squads = data.get("squads", current["squads"])
-        max_login_logs = int(data.get("max_login_logs", current["max_login_logs"]) or 100)
-        max_login_logs = max(10, min(max_login_logs, 2000))
-        db.execute(
-            """UPDATE config SET strategic_pillars = ?, squads = ?, stages = ?,
-               max_login_logs = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
-            (json.dumps(strategic_pillars), json.dumps(squads), json.dumps(stages),
-             max_login_logs, row["id"]),
-        )
-        trim_login_logs(db, max_login_logs)
-        db.commit()
-        shared = config_to_dict(get_shared_config_row(db))
-        breakdown = [merged_pod_config(shared, get_pod_config_row(db, p), p) for p in PODS]
-        return jsonify({**shared, "pod": None, "pod_label": "All PODS (Engine 1)",
-                        "pods_breakdown": breakdown})
 
-    # admin: only their own POD's target/achievement figures - never the shared taxonomy.
-    pod = user["pod"]
+def _update_pod_figures(db, pod, data):
+    """A POD's own admin, or super_admin acting on a chosen POD: that POD's
+    target/achievement/recurring figures - never the shared taxonomy."""
     row = get_pod_config_row(db, pod)
     current = config_to_dict(row)
 
@@ -1516,9 +1600,50 @@ def update_config():
         (target_amount, json.dumps(am_targets), json.dumps(am_achievements),
          json.dumps(am_recurring), current_achievement, recurring_revenue, row["id"]),
     )
+
+
+CONFIG_MONEY_KEYS = ("target_amount", "am_targets", "am_achievements", "am_recurring",
+                     "current_achievement", "recurring_revenue")
+CONFIG_TAXONOMY_KEYS = ("strategic_pillars", "stages", "squads", "max_login_logs")
+
+
+@app.route("/api/config", methods=["PUT"])
+@login_required(roles=("admin", "engine1_exec", "super_admin"))
+def update_config():
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    user = g.current_user
+
+    if user["role"] == "engine1_exec":
+        # Engine1 exec owns only the Engine-1-wide shared taxonomy - never any POD's
+        # own target/achievement figures.
+        _update_shared_taxonomy(db, data)
+        db.commit()
+        return jsonify(resolve_config_for(db, user))
+
+    if user["role"] == "super_admin":
+        # super_admin can touch both: the shared taxonomy if those fields are present,
+        # and/or a chosen POD's own figures if those fields are present (that POD must
+        # be selected via ?pod=, the header POD selector, or a `pod` field in the body).
+        if any(k in data for k in CONFIG_TAXONOMY_KEYS):
+            _update_shared_taxonomy(db, data)
+        pod = None
+        if any(k in data for k in CONFIG_MONEY_KEYS):
+            pod = mutation_pod_for(user, data)
+            if not pod:
+                return jsonify({"error": "Select a POD (via the header POD selector) to "
+                                         "edit its target/achievement figures"}), 400
+            _update_pod_figures(db, pod, data)
+        db.commit()
+        if pod:
+            shared = config_to_dict(get_shared_config_row(db))
+            return jsonify(merged_pod_config(shared, get_pod_config_row(db, pod), pod))
+        return jsonify(resolve_config_for(db, user))
+
+    # admin: only their own POD's target/achievement figures - never the shared taxonomy.
+    _update_pod_figures(db, user["pod"], data)
     db.commit()
-    shared = config_to_dict(get_shared_config_row(db))
-    return jsonify(merged_pod_config(shared, get_pod_config_row(db, pod), pod))
+    return jsonify(resolve_config_for(db, user))
 
 
 # --------------------------------------------------------------------------
@@ -1569,7 +1694,7 @@ def text_to_actions(text):
 
 
 @app.route("/api/export/xlsx", methods=["GET"])
-@login_required(roles=("admin",))
+@login_required(roles=("admin", "super_admin"))
 def export_xlsx():
     try:
         from openpyxl import Workbook
@@ -1579,7 +1704,9 @@ def export_xlsx():
                                  "Run: pip install --user openpyxl, then reload the web app."}), 500
 
     db = get_db()
-    pod = g.current_user["pod"]
+    pod = mutation_pod_for(g.current_user)
+    if not pod:
+        return jsonify({"error": "Select a POD (via ?pod=) to export its data backup"}), 400
     deals = [deal_to_dict(r) for r in
              db.execute("SELECT * FROM deals WHERE pod = ? ORDER BY id", (pod,)).fetchall()]
     shared = config_to_dict(get_shared_config_row(db))
@@ -1704,7 +1831,7 @@ def export_xlsx():
 
 
 @app.route("/api/import/xlsx", methods=["POST"])
-@login_required(roles=("admin",))
+@login_required(roles=("admin", "super_admin"))
 def import_xlsx():
     try:
         from openpyxl import load_workbook
@@ -1723,7 +1850,9 @@ def import_xlsx():
         return jsonify({"error": f"Could not read this file as .xlsx ({exc})"}), 400
 
     db = get_db()
-    pod = g.current_user["pod"]
+    pod = mutation_pod_for(g.current_user)
+    if not pod:
+        return jsonify({"error": "Select a POD (via the header POD selector) to import into"}), 400
     summary = {"updated": 0, "created": 0, "deleted": 0, "users_created": 0,
                "proofs_updated": 0, "config_updated": False}
 
@@ -2049,7 +2178,7 @@ def get_performance():
 
 
 @app.route("/api/config/am_targets/import", methods=["POST"])
-@login_required(roles=("admin",))
+@login_required(roles=("admin", "super_admin"))
 def import_am_targets():
     """Bulk-update AM Target/YTD Actual/Recurring FY26 from the same monthly
     'PODS (2)' performance workbook already used for Performance import, instead
@@ -2076,7 +2205,9 @@ def import_am_targets():
                                  "like 'PODS (2)'."}), 400
 
     db = get_db()
-    pod = g.current_user["pod"]
+    pod = mutation_pod_for(g.current_user)
+    if not pod:
+        return jsonify({"error": "Select a POD (via the header POD selector) to import into"}), 400
     row = get_pod_config_row(db, pod)
     cfg = config_to_dict(row)
     am_targets = dict(cfg["am_targets"])
@@ -2109,7 +2240,7 @@ def import_am_targets():
 
 
 @app.route("/api/performance/import", methods=["POST"])
-@login_required(roles=("admin",))
+@login_required(roles=("admin", "super_admin"))
 def import_performance():
     try:
         from openpyxl import load_workbook
@@ -2133,7 +2264,9 @@ def import_performance():
                                  "'PODS (2)' and one like 'byAccount (BP)'."}), 400
 
     db = get_db()
-    pod = g.current_user["pod"]
+    pod = mutation_pod_for(g.current_user)
+    if not pod:
+        return jsonify({"error": "Select a POD (via the header POD selector) to import into"}), 400
     db.execute(
         "INSERT INTO performance (pod, label, source_file, am_summary, accounts) VALUES (?, ?, ?, ?, ?)",
         (pod, label or datetime.now().strftime("%b %Y"),
