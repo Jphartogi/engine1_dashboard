@@ -171,8 +171,9 @@ Enforced both in the UI and server-side (`can_edit_deal()`, `deal_visible_to()`,
   churn) − 2026 pipeline`, with a stacked coverage bar so you instantly see who is short. Enter each
   AM's Target / YTD / Recurring under Settings → Account Manager Targets, or use the **Import
   Target/Actual/Recurring** button (admin only) right on this Gap & Targets sub-tab to bulk-update
-  them from the same monthly "PODS (2)" performance workbook already used for Performance import —
-  only account managers matched by name in the file are changed, everyone else's figures are left
+  them from the same monthly ACH workbook already used for Performance import (single-POD or the
+  Engine-1-wide file, same POD-matching as above) — only account managers matched by name in the file
+  are changed, everyone else's figures are left
   untouched, and any unmatched names are reported back so nothing is silently skipped.
 - **Import Engine 1 Target & Performance (all PODS)** — super_admin only, in Settings. Upload the
   monthly Engine 1 ACH workbook (one file with a "PODS (1)", "PODS (2)" and "PODS (3)" sheet plus a
@@ -288,8 +289,13 @@ Enforced both in the UI and server-side (`can_edit_deal()`, `deal_visible_to()`,
   for every AM short of target it checks whether they have blocked deals and calls that out as a
   likely contributor, or — if there are no blockers on file — says the gap more likely needs pipeline
   generation than escalation. Click or double-click anything to open the full opportunity detail.
-- **Performance tab** — upload the monthly **PODS 2 - ACH** workbook from the performance team
-  (admin only) and the dashboard reads the `PODS (2)` and `byAccount (BP)` sheets to show:
+- **Performance tab** — upload the monthly ACH workbook from the performance team (admin/pod_head
+  only) and the dashboard reads a `PODS (N)` sheet and the `byAccount (BP)` sheet to show the numbers
+  below. Accepts either a genuine single-POD file, **or** the Engine-1-wide file that carries all
+  three PODS' sheets at once (uploading this same file from any POD's Performance tab correctly picks
+  out just that POD's own sheet and account rows — you don't need a separate single-POD export per
+  POD; see the multi-POD import in §5 if you'd rather update all three PODS in one action instead of
+  three separate uploads). Shows:
   team scorecard (Target FY, Actual YTD, MRC, PO on Hand, Forecast, Gap, attainment);
   **pipeline cover** against the conservative 3× rule per AM; monthly target vs actual/forecast;
   **MRC run-rate with next-quarter and full-year projection** (no-churn assumption);

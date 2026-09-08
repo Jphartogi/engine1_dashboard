@@ -2368,14 +2368,39 @@ def _parse_account_sheet(acc_sheet):
     return accounts
 
 
-def parse_performance_workbook(wb):
-    """Read the first 'PODS (N)' sheet and the 'byAccount (BP)' sheet into plain
-    dicts - the single-POD monthly ACH workbook format."""
+_HEAD_NUM_RE = re.compile(r"head\s*([123])\b", re.I)
+_POD_SHEET_RE = re.compile(r"^pods\s*\(?\s*([123])\s*\)?", re.I)
+
+
+def _head_label_to_pod(label):
+    m = _HEAD_NUM_RE.search(str(label or ""))
+    return f"pods{m.group(1)}" if m else None
+
+
+def parse_performance_workbook(wb, pod=None):
+    """Read a 'PODS (N)' sheet and the 'byAccount (BP)' sheet into plain dicts -
+    the monthly ACH workbook format, for a single-POD import.
+
+    Accepts both a genuine single-POD file (one 'PODS (N)' sheet) and the
+    Engine-1-wide file that carries all three PODS' sheets at once: when `pod`
+    is given, the sheet matching that POD's number is preferred over just
+    taking the first 'PODS'-prefixed sheet, and account rows tagged for a
+    different POD (via the 'Business Engine 1 Head N' label) are filtered out
+    so a POD's own admin uploading the combined file only ever gets their own
+    POD's numbers - the same routing `parse_all_pods_workbook` uses, applied to
+    a single POD instead of all three."""
     sheet = None
-    for nm in wb.sheetnames:
-        if nm.strip().lower().startswith("pods"):
-            sheet = wb[nm]
-            break
+    if pod:
+        for nm in wb.sheetnames:
+            m = _POD_SHEET_RE.match(nm.strip())
+            if m and f"pods{m.group(1)}" == pod:
+                sheet = wb[nm]
+                break
+    if sheet is None:
+        for nm in wb.sheetnames:
+            if nm.strip().lower().startswith("pods"):
+                sheet = wb[nm]
+                break
     am_rows = _parse_pods_sheet(sheet) if sheet is not None else []
 
     acc_sheet = None
@@ -2384,16 +2409,12 @@ def parse_performance_workbook(wb):
             acc_sheet = wb[nm]
             break
     accounts = _parse_account_sheet(acc_sheet) if acc_sheet is not None else []
+    if pod:
+        # Keep rows tagged for this POD, plus any row without a recognisable
+        # Head-N label at all (a genuine single-POD file's account sheet may
+        # not carry that column) - only drop rows clearly tagged for another POD.
+        accounts = [a for a in accounts if _head_label_to_pod(a.get("pods")) in (pod, None)]
     return am_rows, accounts
-
-
-_HEAD_NUM_RE = re.compile(r"head\s*([123])\b", re.I)
-_POD_SHEET_RE = re.compile(r"^pods\s*\(?\s*([123])\s*\)?", re.I)
-
-
-def _head_label_to_pod(label):
-    m = _HEAD_NUM_RE.search(str(label or ""))
-    return f"pods{m.group(1)}" if m else None
 
 
 def parse_all_pods_workbook(wb):
@@ -2465,16 +2486,18 @@ def import_am_targets():
     except Exception as exc:
         return jsonify({"error": f"Could not read this file as .xlsx ({exc})"}), 400
 
-    am_rows, _accounts = parse_performance_workbook(wb)
-    if not am_rows:
-        return jsonify({"error": "No recognisable per-AM figures found. Expected the same "
-                                 "workbook used for Performance import, with a sheet named "
-                                 "like 'PODS (2)'."}), 400
-
     db = get_db()
     pod = mutation_pod_for(g.current_user)
     if not pod:
         return jsonify({"error": "Select a POD (via the header POD selector) to import into"}), 400
+
+    am_rows, _accounts = parse_performance_workbook(wb, pod)
+    if not am_rows:
+        return jsonify({"error": "No recognisable per-AM figures found. Expected the same "
+                                 "workbook used for Performance import, with a sheet named "
+                                 "like 'PODS (2)' (or the Engine-1-wide file, matched to your "
+                                 "own POD)."}), 400
+
     row = get_pod_config_row(db, pod)
     cfg = config_to_dict(row)
     am_targets = dict(cfg["am_targets"])
@@ -2794,15 +2817,16 @@ def import_performance():
     except Exception as exc:
         return jsonify({"error": f"Could not read this file as .xlsx ({exc})"}), 400
 
-    am_rows, accounts = parse_performance_workbook(wb)
-    if not am_rows and not accounts:
-        return jsonify({"error": "No recognisable data. Expected a sheet named like "
-                                 "'PODS (2)' and one like 'byAccount (BP)'."}), 400
-
     db = get_db()
     pod = mutation_pod_for(g.current_user)
     if not pod:
         return jsonify({"error": "Select a POD (via the header POD selector) to import into"}), 400
+
+    am_rows, accounts = parse_performance_workbook(wb, pod)
+    if not am_rows and not accounts:
+        return jsonify({"error": "No recognisable data. Expected a sheet named like "
+                                 "'PODS (2)' and one like 'byAccount (BP)' (or the Engine-1-wide "
+                                 "file, matched to your own POD)."}), 400
     db.execute(
         "INSERT INTO performance (pod, label, source_file, am_summary, accounts) VALUES (?, ?, ?, ?, ?)",
         (pod, label or datetime.now().strftime("%b %Y"),

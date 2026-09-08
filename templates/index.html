@@ -673,7 +673,7 @@
             <div id="amTargetsImportWrap" class="flex flex-wrap items-center gap-2 mb-3" style="display:none">
               <input id="amTargetsImportFile" type="file" accept=".xlsx" class="text-xs" style="color:var(--text-muted)">
               <button id="amTargetsImportBtn" class="text-xs px-3 py-1.5 rounded-lg" style="border:1px solid var(--border);color:var(--text)"><i class="fa-solid fa-file-arrow-up mr-1"></i>Import Target/Actual/Recurring</button>
-              <span class="text-[11px]" style="color:var(--text-faint)">Uses the same monthly &quot;PODS (2)&quot; workbook as Performance import.</span>
+              <span class="text-[11px]" style="color:var(--text-faint)">Uses the same monthly ACH workbook as Performance import — either a single-POD file, or the Engine-1-wide file (matched to your own POD).</span>
             </div>
             <p id="amTargetsImportResult" class="text-[11px] mb-3" style="color:var(--text-muted)"></p>
             <p id="amTargetTeam" class="text-xs mb-3" style="color:var(--text-muted)"></p>
@@ -883,7 +883,7 @@
           </span>
         </div>
         <p id="perfEmpty" class="card elev p-8 text-center text-sm" style="color:var(--text-muted)">
-          No performance data yet. An admin can upload the monthly <b>PODS 2 - ACH</b> workbook from the performance team using the button above.
+          No performance data yet. An admin/pod_head can upload the monthly ACH workbook from the performance team using the button above — either a single-POD file, or the Engine-1-wide file (matched to your own POD).
         </p>
 
         <div id="perfBody" style="display:none">
