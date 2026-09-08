@@ -1518,6 +1518,7 @@ document.getElementById('podFilter').addEventListener('change', async e=>{
   if(activeTab==='analytics') renderAnalytics();
   if(activeTab==='weeklymeeting') renderWeeklyMeeting();
   if(activeTab==='management') renderManagement();
+  if(activeTab==='performance') renderPerformance();
 });
 
 function populateSelectors(){
@@ -2750,7 +2751,7 @@ function renderManagement(){
 
 /* ================= PERFORMANCE (monthly ACH workbook) ================= */
 let PERF=null;
-async function loadPerformance(){ try{ PERF=await api('/api/performance'); }catch(e){ PERF={available:false}; } }
+async function loadPerformance(){ try{ PERF=await api('/api/performance'+podQueryParam()); }catch(e){ PERF={available:false}; } }
 document.getElementById('perfFilterAM').addEventListener('change',renderPerformance);
 document.getElementById('pfChurnBasis').addEventListener('change',renderPerformance);
 document.getElementById('perfImportBtn').addEventListener('click',()=>{
@@ -2798,7 +2799,13 @@ function monthKeys(){
 
 function renderPerformance(){
   const body=document.getElementById('perfBody'), empty=document.getElementById('perfEmpty');
-  if(!PERF||!PERF.available){ body.style.display='none'; empty.style.display=''; document.getElementById('perfSnapshot').textContent='no data'; return; }
+  if(!PERF||!PERF.available){
+    body.style.display='none'; empty.style.display=''; document.getElementById('perfSnapshot').textContent='no data';
+    empty.textContent = (PODLESS_ROLES_JS.includes(ROLE) && !ENGINE1_POD_FILTER)
+      ? 'Performance is tracked per POD. Pick a POD from the header selector above to see its data — "All PODS" has no single combined snapshot.'
+      : 'No performance data yet. An admin/pod_head can upload the monthly ACH workbook from the performance team using the button above — either a single-POD file, or the Engine-1-wide file (matched to your own POD).';
+    return;
+  }
   empty.style.display='none'; body.style.display='';
   document.getElementById('perfSnapshot').textContent=`${PERF.label||'snapshot'} · uploaded ${(PERF.uploaded_at||'').split(' ')[0]}`;
 
@@ -3767,6 +3774,7 @@ document.getElementById('perfExportPdfBtn').addEventListener('click',async()=>{
     showToast('Generating performance PDF...');
     const p=new URLSearchParams();
     const am=document.getElementById('perfFilterAM').value; if(am) p.set('am',am);
+    if(PODLESS_ROLES_JS.includes(ROLE) && ENGINE1_POD_FILTER) p.set('pod',ENGINE1_POD_FILTER);
     const res=await fetch('/api/performance/export_pdf?'+p.toString(),{headers:{'Authorization':'Bearer '+TOKEN}});
     if(!res.ok){ const b=await res.json().catch(()=>({})); throw new Error(b.error||'Failed to generate report'); }
     const blob=await res.blob(); const url=URL.createObjectURL(blob);
