@@ -122,6 +122,22 @@
   .widget > summary::-webkit-details-marker { display:none; }
   .widget summary .chev { transition: transform .18s ease; }
   .widget[open] summary .chev { transform: rotate(90deg); }
+  /* --- searchable "assigned to" user picker --- */
+  .assignee-dropdown {
+    position:absolute; z-index:60; top:calc(100% + 2px); left:0; right:0; max-height:190px;
+    overflow-y:auto; background:var(--surface); border:1px solid var(--border); border-radius:8px;
+    box-shadow:0 8px 20px -4px var(--shadow-2, rgba(0,0,0,.35));
+  }
+  .assignee-opt { padding:6px 10px; font-size:12px; cursor:pointer; }
+  .assignee-opt:hover, .assignee-opt.hl { background:var(--surface-2); }
+  /* --- vertical Action Plan timeline --- */
+  .timeline-track { position:relative; padding-left:26px; }
+  .timeline-track::before { content:''; position:absolute; left:9px; top:2px; bottom:2px; width:2px; background:var(--border); }
+  .timeline-row { position:relative; padding-bottom:14px; }
+  .timeline-row:last-child { padding-bottom:0; }
+  .timeline-dot { position:absolute; left:-26px; top:0; width:20px; height:20px; border-radius:9999px; display:flex; align-items:center; justify-content:center; font-size:9px; color:#fff; box-shadow:0 0 0 3px var(--surface); }
+  .timeline-today-row { position:relative; margin:2px 0 14px; padding-left:0; display:flex; align-items:center; gap:8px; }
+  .timeline-today-row::before { content:''; flex-shrink:0; width:20px; height:20px; margin-left:-26px; border-radius:9999px; background:var(--surface); border:2px solid var(--primary); box-shadow:0 0 0 3px var(--surface); }
   /* --- dark top bar, AWS-style: fixed navy chrome regardless of light/dark theme --- */
   header.app-topbar {
     background: #16222c; border-bottom: 1px solid rgba(255,255,255,.08);
@@ -424,8 +440,28 @@
             <option value="project">Project</option>
             <option value="product">Product</option>
           </select>
+          <div class="flex-1"></div>
+          <button id="wmSummaryBtn" type="button" class="text-sm px-3 py-1.5 rounded-lg" style="background:var(--surface-2);color:var(--text)"><i class="fa-solid fa-list-check mr-1"></i>Get Weekly Summary</button>
         </div>
         <p class="text-[11px] mb-3" style="color:var(--text-faint)"><i class="fa-solid fa-circle-info mr-1"></i>Everything Solution, Project and Product have flagged on opportunities — use this to run the weekly sync. Click a KPI to filter.</p>
+
+        <div id="wmSummaryPanel" class="card elev p-5 mb-4" style="display:none">
+          <div class="flex items-center justify-between mb-1">
+            <p class="text-sm font-medium"><i class="fa-solid fa-calendar-week mr-1.5" style="color:var(--primary)"></i>Weekly Summary</p>
+            <button id="wmSummaryCloseBtn" type="button" style="color:var(--text-muted)"><i class="fa-solid fa-xmark text-lg"></i></button>
+          </div>
+          <p class="text-[11px] mb-3" style="color:var(--text-faint)">Condensed by opportunity — team tasks, Timeline Items, and Execution Framework evidence, grouped so it's quick to walk through in the meeting.</p>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div>
+              <p class="text-xs font-medium mb-2" style="color:var(--success)"><i class="fa-solid fa-circle-check mr-1"></i>Done — last 7 days (<span id="wmSummaryDoneCount">0</span>)</p>
+              <div id="wmSummaryDoneList" class="space-y-1.5"></div>
+            </div>
+            <div>
+              <p class="text-xs font-medium mb-2" style="color:var(--primary)"><i class="fa-solid fa-calendar-days mr-1"></i>Planned — next 7 days (<span id="wmSummaryPlannedCount">0</span>)</p>
+              <div id="wmSummaryPlannedList" class="space-y-1.5"></div>
+            </div>
+          </div>
+        </div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
           <div id="wmKpiBlockedCard" class="card elev p-3 clickable kpi-card"><p class="text-[11px]" style="color:var(--text-muted)"><i class="fa-solid fa-ban mr-1"></i>Blocked</p><p id="wmKpiBlocked" class="text-xl font-medium mt-1" style="color:var(--danger)">0</p></div>
           <div id="wmKpiDiscussCard" class="card elev p-3 clickable kpi-card"><p class="text-[11px]" style="color:var(--text-muted)"><i class="fa-solid fa-comments mr-1"></i>Needs discussion</p><p id="wmKpiDiscuss" class="text-xl font-medium mt-1" style="color:var(--warning)">0</p></div>
@@ -436,6 +472,16 @@
         <div class="card elev p-5">
           <div id="wmList" class="space-y-2"></div>
         </div>
+        <details id="wmSolvedSection" class="widget card elev p-5 mt-4" style="display:none">
+          <summary class="flex items-center gap-2" style="list-style:none;cursor:pointer">
+            <i class="fa-solid fa-chevron-right chev text-xs" style="color:var(--text-faint)"></i>
+            <i class="fa-solid fa-circle-check" style="color:var(--success)"></i>
+            <span class="text-sm font-medium" style="color:var(--text)">Solved</span>
+            <span id="wmSolvedCount" class="chip" style="color:var(--text-muted)">0</span>
+          </summary>
+          <p class="text-[11px] mt-1 mb-3" style="color:var(--text-faint)">Items already marked done, moved out of the active list above so it stays focused on what's still open.</p>
+          <div id="wmSolvedList" class="space-y-2"></div>
+        </details>
       </section>
 
       <!-- ============ MY TEAM TASKS (solution / project / product) ============ -->
@@ -746,6 +792,15 @@
               </table>
             </div>
           </div>
+          <div id="allPodsImportWrap" class="card elev p-5 lg:col-span-2" style="display:none">
+            <p class="text-sm font-medium mb-1"><i class="fa-solid fa-file-arrow-up mr-1.5" style="color:var(--primary)"></i>Import Engine 1 Target &amp; Performance (all PODS)</p>
+            <p class="text-[11px] mb-3" style="color:var(--text-faint)">One workbook with a "PODS (1)", "PODS (2)" and "PODS (3)" sheet plus a shared "byAccount (BP)" sheet — the monthly Engine 1 ACH file. For every POD found, this sets that POD's Performance snapshot, per-AM Target/YTD Actual/Recurring, <b>and</b> that POD's own Full-Year Target/Achieved/Recurring (as the sum of its AM figures) — it's the authoritative source for those numbers, not just the per-AM table.</p>
+            <div class="flex flex-wrap items-center gap-2">
+              <input id="allPodsImportFile" type="file" accept=".xlsx" class="text-xs" style="color:var(--text-muted)">
+              <button id="allPodsImportBtn" class="text-xs px-3 py-1.5 rounded-lg" style="border:1px solid var(--border);color:var(--text)"><i class="fa-solid fa-file-arrow-up mr-1"></i>Import all PODS</button>
+            </div>
+            <div id="allPodsImportResult" class="text-[11px] mt-3 space-y-1" style="color:var(--text-muted)"></div>
+          </div>
           <div class="card elev p-5 lg:col-span-2">
             <div class="flex items-center justify-between mb-3">
               <p class="text-sm font-medium">User Management</p>
@@ -1002,6 +1057,10 @@
         <label class="flex items-center gap-2 text-xs font-medium" style="color:var(--text-muted)"><input id="dealIsBlocked" type="checkbox"> This opportunity is blocked</label>
         <input id="dealBlockerDesc" type="text" placeholder="Describe the blocker..." class="field w-full mt-2 px-3 py-2 text-sm">
       </div>
+      <div class="rounded-lg p-3" style="border:1px solid var(--border)">
+        <label class="flex items-center gap-2 text-xs font-medium" style="color:var(--text-muted)"><input id="dealIsClosedLost" type="checkbox"> Mark as Closed Lost</label>
+        <input id="dealClosedLostReason" type="text" placeholder="Why was this lost? e.g. lost to competitor pricing, budget cut, project cancelled..." class="field w-full mt-2 px-3 py-2 text-sm">
+      </div>
       </div><!-- /details pane -->
 
       <div id="mtab-framework" class="modal-tab-pane space-y-4" style="display:none">
@@ -1039,8 +1098,29 @@
 
         <div class="rounded-lg p-3" style="border:1px solid var(--border)">
           <p class="text-xs font-medium mb-2" style="color:var(--text-muted)"><i class="fa-solid fa-timeline mr-1" style="color:var(--primary)"></i>Timeline</p>
-          <p class="text-[10px] mb-3" style="color:var(--text-faint)">Planned execution steps plus the milestones above, from today through to the end of the project.</p>
+          <p class="text-[10px] mb-3" style="color:var(--text-faint)">Your own Timeline Items below, plus the milestones above, from today through to the end of the project.</p>
           <div id="actionTimeline"></div>
+        </div>
+
+        <div class="rounded-lg p-3" style="border:1px solid var(--border)">
+          <div class="flex items-center justify-between mb-1">
+            <p class="text-xs font-medium" style="color:var(--text-muted)"><i class="fa-solid fa-calendar-days mr-1" style="color:var(--primary)"></i>Timeline Items</p>
+            <span id="timelineItemsCount" class="chip" style="color:var(--text-faint)">0</span>
+          </div>
+          <p class="text-[10px] mb-2" style="color:var(--text-faint)">Your own dated plan for this opportunity — independent of the Execution Framework, so you can note what's next without tying it to a specific proof. These are what drives the Timeline above.</p>
+          <div id="timelineItemsList" class="space-y-2 mb-2"></div>
+          <div class="flex gap-2 flex-wrap">
+            <input id="newTimelineItemText" type="text" placeholder="What's the plan..." class="field flex-1 px-3 py-2 text-sm" style="min-width:160px">
+            <input id="newTimelineItemStart" type="date" title="Start date" class="field px-2 py-2 text-sm" style="width:135px">
+            <input id="newTimelineItemEnd" type="date" title="End date (optional)" class="field px-2 py-2 text-sm" style="width:135px">
+            <select id="newTimelineItemStatus" class="field px-2 py-2 text-sm" style="width:118px">
+              <option value="not_started">Not started</option>
+              <option value="planned" selected>Planned</option>
+              <option value="in_progress">In progress</option>
+              <option value="done">Done</option>
+            </select>
+            <button type="button" id="addTimelineItemBtn" class="text-sm px-3 py-2 rounded-lg" style="background:var(--surface-2);color:var(--text)">Add</button>
+          </div>
         </div>
 
         <div class="rounded-lg p-3" style="border:1px solid var(--border)">
@@ -1048,23 +1128,8 @@
             <p class="text-xs font-medium" style="color:var(--text-muted)"><i class="fa-solid fa-map mr-1" style="color:var(--primary)"></i>Planned execution steps</p>
             <span id="plannedStepsCount" class="text-[11px]" style="color:var(--text-faint)">0 planned</span>
           </div>
-          <p class="text-[10px] mb-2" style="color:var(--text-faint)">Every evidence entry across the 8 Enterprise Proofs currently marked <b>Planned</b> — what the team still has to do for this opportunity. Bump the status here as work moves along, or edit it from the Execution Framework tab.</p>
+          <p class="text-[10px] mb-2" style="color:var(--text-faint)">Every evidence entry across the 8 Enterprise Proofs currently marked <b>Planned</b> — what the team still has to do for this opportunity. Bump the status here as work moves along, or edit it from the Execution Framework tab. Shown for reference only — it no longer feeds the Timeline above.</p>
           <div id="plannedStepsList" class="space-y-1.5"></div>
-        </div>
-
-        <div class="rounded-lg p-3" style="border:1px solid var(--border)">
-          <div class="flex items-center justify-between mb-1">
-            <p class="text-xs font-medium" style="color:var(--text-muted)"><i class="fa-solid fa-list-check mr-1" style="color:var(--primary)"></i>Next actions</p>
-            <span id="nextActionsProgress" class="chip" style="color:var(--text-faint)">0 / 0</span>
-          </div>
-          <p class="text-[10px] mb-2" style="color:var(--text-faint)">Ad-hoc actions that don't belong to a specific proof.</p>
-          <div class="w-full rounded-full h-1.5 mb-3" style="background:var(--surface-3)"><div id="nextActionsBar" class="h-1.5 rounded-full" style="width:0%;background:var(--primary)"></div></div>
-          <div id="nextActionsList" class="space-y-2 mb-2"></div>
-          <div class="flex gap-2">
-            <input id="newActionInput" type="text" placeholder="Add a next action..." class="field flex-1 px-3 py-2 text-sm">
-            <input id="newActionDue" type="date" title="Target date" class="field px-3 py-2 text-sm" style="width:150px">
-            <button type="button" id="addActionBtn" class="text-sm px-3 py-2 rounded-lg" style="background:var(--surface-2);color:var(--text)">Add</button>
-          </div>
         </div>
       </div><!-- /actionplan pane -->
 
@@ -1082,6 +1147,10 @@
                 <option value="project">Project</option>
                 <option value="product">Product</option>
               </select>
+              <div class="assignee-combo flex-1" style="position:relative;min-width:180px">
+                <input id="newTaskAssignee" type="text" class="assignee-input field px-3 py-2 text-sm w-full" placeholder="Assigned to — search users..." title="Who this task is targeted to" autocomplete="off">
+                <div class="assignee-dropdown" style="display:none"></div>
+              </div>
               <select id="newTaskStatus" class="field px-3 py-2 text-sm" style="width:150px" title="Status right now">
                 <option value="not_started">Not started</option>
                 <option value="in_progress">In progress</option>
@@ -1117,7 +1186,7 @@
       <div><label class="block text-xs mb-1" style="color:var(--text-muted)">Username</label><input id="userUsername" required type="text" class="field w-full px-3 py-2 text-sm"></div>
       <div><label class="block text-xs mb-1" style="color:var(--text-muted)">Full name (AM display name)</label><input id="userFullName" type="text" class="field w-full px-3 py-2 text-sm"></div>
       <div><label class="block text-xs mb-1" style="color:var(--text-muted)">Password <span id="userPasswordHint" style="color:var(--text-faint)"></span></label><input id="userPassword" type="password" class="field w-full px-3 py-2 text-sm"></div>
-      <div><label class="block text-xs mb-1" style="color:var(--text-muted)">Role</label><select id="userRole" class="field w-full px-3 py-2 text-sm"><option value="admin">Admin</option><option value="account_manager">Account Manager</option><option value="management">Management</option><option value="solution">Solution Team</option><option value="project">Project Team</option><option value="product">Product Team</option></select><p class="text-[10px] mt-1" style="color:var(--text-faint)">Solution / Project / Product can only update the status &amp; note on their own team's tasks in the Team Tasks tab &mdash; nothing else on an opportunity.</p></div>
+      <div><label class="block text-xs mb-1" style="color:var(--text-muted)">Role</label><select id="userRole" class="field w-full px-3 py-2 text-sm"><option value="admin">Admin</option><option value="pod_head">PODS Head</option><option value="account_manager">Account Manager</option><option value="management">Management</option><option value="solution">Solution Team</option><option value="project">Project Team</option><option value="product">Product Team</option></select><p class="text-[10px] mt-1" style="color:var(--text-faint)">Solution / Project / Product can only update the status &amp; note on their own team's tasks in the Team Tasks tab &mdash; nothing else on an opportunity.</p></div>
       <div id="userPodWrap" style="display:none"><label class="block text-xs mb-1" style="color:var(--text-muted)">POD</label><select id="userPod" class="field w-full px-3 py-2 text-sm"><option value="pods1">PODS 1</option><option value="pods2">PODS 2</option><option value="pods3">PODS 3</option></select><p class="text-[10px] mt-1" style="color:var(--text-faint)">Not shown/needed for Engine1 Executive or Super Admin roles, which belong to no single POD.</p></div>
       <div class="flex justify-end gap-2 pt-2"><button type="button" data-close-modal="userModal" class="text-sm px-4 py-2 rounded-lg" style="border:1px solid var(--border);color:var(--text-muted)">Cancel</button><button type="submit" class="btn-primary text-sm px-4 py-2 rounded-lg">Save</button></div>
     </form>
@@ -1161,18 +1230,17 @@ let POD_LABEL = localStorage.getItem('dt_pod_label') || '';
 // engine1_exec has no POD of its own; this holds the value of the header POD selector -
 // '' means "All PODS combined", or a specific pod key to drill into just that one.
 let ENGINE1_POD_FILTER = '';
-let DEALS = [], ALL_DEALS = [], CONFIG = { target_amount:0, strategic_pillars:[], squads:[], stages:[], am_targets:{}, am_achievements:{}, am_recurring:{}, current_achievement:0, recurring_revenue:0, max_login_logs:100 }, USERS = [], AMS = [];
+let DEALS = [], ALL_DEALS = [], CONFIG = { target_amount:0, strategic_pillars:[], squads:[], stages:[], am_targets:{}, am_achievements:{}, am_recurring:{}, current_achievement:0, recurring_revenue:0, max_login_logs:100 }, USERS = [], AMS = [], ASSIGNABLE_USERS = [];
 // Bulk-delete on the Tracker: admin/account_manager/super_admin only (same permission
 // rule as single-delete, checked per-id server-side too); selection persists across
 // re-renders (filtering, sorting, paging) until cleared or the deals reload.
 const BULK_DELETE_ROLES_JS = ['admin','account_manager','super_admin'];
 let selectedDealIds = new Set();
 let currentPageEditableIds = [];
-let nextActionsDraft = [], confirmCallback = null, analyticsFilters = {};
+let timelineItemsDraft = [], confirmCallback = null, analyticsFilters = {};
 let dealModalDirty = false, dealModalRestricted = false, dealAutosaveTimer = null, dealAutosaveInFlight = false;
 let currentPage = 1, calMonth = new Date();
 let proofsDraft = {}, fwDrillKey = null;
-let lastPlannedRows = [];
 // The 8 Enterprise Proofs (fetched from the server; this is the fallback order/labels)
 let PROOF_FRAMEWORK = [
   {key:'qualification',name:'Proof of Qualification',description:'Ensure target customers (B500) have the need, budget, and alignment with our solution'},
@@ -1214,6 +1282,22 @@ function normalizeProofs(raw){
     out[p.key]={status:PROOF_STATUS_META[st]?st:'not_started', due:(it.due||'').slice(0,10), entries};
   });
   return out;
+}
+/* Timeline Items: the deal's own independent dated plan (stored in the `next_actions`
+   field for backward compatibility with existing data). A legacy {action, done, due}
+   entry from before this feature existed is migrated transparently into the current
+   {text, date, end, status} shape - nothing already saved is ever lost. */
+function normalizeTimelineItems(raw){
+  return (Array.isArray(raw)?raw:[]).map(it=>{
+    if(it && typeof it==='object' && 'text' in it){
+      const date=String(it.date||'').slice(0,10);
+      let end=String(it.end||'').slice(0,10);
+      if(end && date && end<date) end='';
+      return {text:String(it.text||'').trim(), date, end, status:ENTRY_STATUS_META[it.status]?it.status:'not_started'};
+    }
+    const legacy=it||{};
+    return {text:String(legacy.action||'').trim(), date:String(legacy.due||'').slice(0,10), end:'', status:legacy.done?'done':'not_started'};
+  }).filter(it=>it.text);
 }
 function proofProgress(proofs){
   const p=normalizeProofs(proofs);
@@ -1298,7 +1382,7 @@ function fmtThousands(v){ const n=String(v==null?'':v).replace(/[^\d]/g,''); ret
 function parseThousands(v){ const n=String(v==null?'':v).replace(/[^\d]/g,''); return n ? parseInt(n,10) : 0; }
 function attachMoney(el){ if(!el||el._money) return; el._money=true; el.addEventListener('input',()=>{ const s=el.selectionStart, before=el.value.length; el.value=fmtThousands(el.value); const after=el.value.length; try{ el.selectionStart=el.selectionEnd=Math.max(0,(s||0)+(after-before)); }catch(e){} }); }
 function showToast(msg, err=false){ const t=document.getElementById('toast'); t.textContent=msg; t.style.background = err?'var(--danger)':'#323639'; t.classList.remove('hidden'); setTimeout(()=>t.classList.add('hidden'),2800); }
-function canEditDeal(d){ return ROLE==='super_admin' || ROLE==='admin' || (ROLE==='account_manager' && d.assigned_am===FULLNAME); }
+function canEditDeal(d){ return ROLE==='super_admin' || (ROLE==='admin'||ROLE==='pod_head') || (ROLE==='account_manager' && d.assigned_am===FULLNAME); }
 function initials(name){ return (name||'?').split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase(); }
 
 async function api(path, opts={}) {
@@ -1356,17 +1440,18 @@ async function enterApp(){
     podBadge.style.display='';
     podBadge.textContent=POD_LABEL||'';
   }
-  document.getElementById('settingsNavBtn').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('settingsNavBtn').style.display = ((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('configNavBtn').style.display = (ROLE==='engine1_exec'||ROLE==='super_admin') ? '' : 'none';
-  document.getElementById('loginLogsNavBtn').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
-  document.getElementById('mgmtNavBtn').style.display = (ROLE==='admin'||ROLE==='management'||ROLE==='engine1_exec'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('loginLogsNavBtn').style.display = ((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('mgmtNavBtn').style.display = ((ROLE==='admin'||ROLE==='pod_head')||ROLE==='management'||ROLE==='engine1_exec'||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('weeklyMeetingNavBtn').style.display = ''; // visible to every role
-  document.getElementById('quickSettingsBtn').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('quickSettingsBtn').style.display = ((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('quickConfigBtn').style.display = (ROLE==='engine1_exec'||ROLE==='super_admin') ? '' : 'none';
-  document.getElementById('perfUploadWrap').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
-  document.getElementById('amTargetsImportWrap').style.display = (ROLE==='admin'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('perfUploadWrap').style.display = ((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('amTargetsImportWrap').style.display = ((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('allPodsImportWrap').style.display = ROLE==='super_admin' ? '' : 'none';
   document.getElementById('trackerImportWrap').style.display = ROLE==='super_admin' ? '' : 'none';
-  document.getElementById('addDealBtn').style.display = (ROLE==='admin'||ROLE==='account_manager'||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('addDealBtn').style.display = ((ROLE==='admin'||ROLE==='pod_head')||ROLE==='account_manager'||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('bulkSelectHeaderCell').style.display = BULK_DELETE_ROLES_JS.includes(ROLE) ? '' : 'none';
   // Solution / Project / Product can see every opportunity (read-only, for context) and
   // their own task inbox, but not Calendar / Analytics / Performance / any edit control.
@@ -1392,7 +1477,7 @@ async function enterApp(){
   }
   await loadDeals();
   await loadPerformance();
-  if(ROLE==='admin'||ROLE==='super_admin') await loadUsers();
+  if((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin') await loadUsers();
   // Management and engine1_exec land on the executive briefing; everyone else on the tracker
   switchTab((ROLE==='management'||PODLESS_ROLES_JS.includes(ROLE)) ? 'management' : CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE) ? 'myteamtasks' : 'tracker');
 }
@@ -1400,9 +1485,9 @@ async function enterApp(){
 /* ================= TABS ================= */
 document.querySelectorAll('.nav-link').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
 function switchTab(tab){
-  if((tab==='settings'||tab==='loginlogs') && !(ROLE==='admin'||ROLE==='super_admin')) return;
+  if((tab==='settings'||tab==='loginlogs') && !((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin')) return;
   if(tab==='configuration' && !(ROLE==='engine1_exec'||ROLE==='super_admin')) return;
-  if(tab==='management' && !(ROLE==='admin'||ROLE==='management'||PODLESS_ROLES_JS.includes(ROLE))) return;
+  if(tab==='management' && !((ROLE==='admin'||ROLE==='pod_head')||ROLE==='management'||PODLESS_ROLES_JS.includes(ROLE))) return;
   if(tab==='myteamtasks' && !CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE)) return;
   if(['calendar','analytics','performance'].includes(tab) && CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE)) return;
   document.querySelectorAll('.nav-link').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
@@ -1567,7 +1652,7 @@ function renderDealsTable(){
     const tr=document.createElement('tr'); tr.className='row-click'; tr.style.borderTop='1px solid var(--border)';
     tr.innerHTML=`
       ${canBulk?`<td class="px-4 py-3" onclick="event.stopPropagation()"><input type="checkbox" class="deal-select-cb" data-id="${deal.id}" ${editable?'':'disabled title="Not yours to delete"'} ${selectedDealIds.has(deal.id)?'checked':''}></td>`:''}
-      <td class="px-4 py-3 font-medium" style="color:var(--text)">${escapeHtml(deal.deal_name)}${deal.is_blocked?' <i class="fa-solid fa-triangle-exclamation ml-1" style="color:var(--danger)"></i>':''}</td>
+      <td class="px-4 py-3 font-medium" style="color:var(--text)">${escapeHtml(deal.deal_name)}${deal.is_blocked?' <i class="fa-solid fa-triangle-exclamation ml-1" style="color:var(--danger)" title="Blocked"></i>':''}${deal.is_closed_lost?' <i class="fa-solid fa-circle-xmark ml-1" style="color:var(--text-faint)" title="Closed Lost"></i>':''}</td>
       <td class="px-4 py-3" style="color:var(--text-muted)">${escapeHtml(deal.customer)}</td>
       <td class="px-4 py-3">${PODLESS_ROLES_JS.includes(ROLE)&&!ENGINE1_POD_FILTER&&deal.pod_label?`<span class="chip mr-1" style="color:var(--primary);border-color:var(--primary)">${escapeHtml(deal.pod_label)}</span>`:''}<span class="chip" style="color:var(--text-muted)">${escapeHtml(deal.assigned_am.split(' ')[0])}</span></td>
       <td class="px-4 py-3" style="color:var(--text-muted)">${escapeHtml(deal.strategic_pillar)}</td>
@@ -1662,7 +1747,8 @@ document.getElementById('bulkDeleteBtn').addEventListener('click',()=>{
 /* ================= DETAIL DRAWER (double-click) ================= */
 function openDetail(id){
   const d=(DEALS.find(x=>x.id===id)||(ALL_DEALS||[]).find(x=>x.id===id)); if(!d) return;
-  const done=d.next_actions.filter(a=>a.done).length, total=d.next_actions.length;
+  const timelineItems=normalizeTimelineItems(d.next_actions);
+  const done=timelineItems.filter(a=>a.status==='done').length, total=timelineItems.length;
   const pct=total?Math.round(done/total*100):0;
   const editable=canEditDeal(d);
   document.getElementById('detailContent').innerHTML=`
@@ -1673,6 +1759,7 @@ function openDetail(id){
     <h2 class="text-xl font-medium mb-1" style="color:var(--text)">${escapeHtml(d.deal_name)}</h2>
     <p class="text-sm mb-4" style="color:var(--text-muted)">${escapeHtml(d.customer)}</p>
     ${d.is_blocked?`<div class="rounded-lg p-3 mb-4 text-sm" style="background:var(--danger-soft);color:var(--danger)"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${escapeHtml(d.blocker_description||'Blocked')}</div>`:''}
+    ${d.is_closed_lost?`<div class="rounded-lg p-3 mb-4 text-sm" style="background:var(--surface-3);color:var(--text-muted)"><i class="fa-solid fa-circle-xmark mr-1"></i>Closed Lost${d.closed_lost_reason?': '+escapeHtml(d.closed_lost_reason):''}</div>`:''}
     <div class="grid grid-cols-2 gap-3 mb-4">
       ${detailStat('TCV (total)', fmtIDR(d.estimated_value))}
       ${detailStat('Rev 2026', `<span style="color:var(--primary)">${fmtIDR(d.revenue_2026)}</span>`)}
@@ -1714,8 +1801,8 @@ function openDetail(id){
       <p class="text-sm" style="color:${d.strategy?'var(--text-muted)':'var(--text-faint)'};white-space:pre-wrap">${d.strategy?escapeHtml(d.strategy):'No strategy captured yet.'}</p>
     </div>
     <div class="mb-4">
-      <div class="flex justify-between text-xs mb-2" style="color:var(--text-muted)"><span>Next Actions (action plan)</span><span>${done}/${total} done (${pct}%)</span></div>
-      <div class="space-y-1.5">${d.next_actions.map(a=>`<div class="flex items-center gap-2 text-sm" style="color:var(--text)"><i class="fa-${a.done?'solid fa-circle-check':'regular fa-circle'}" style="color:${a.done?'var(--success)':'var(--text-faint)'}"></i><span class="flex-1 ${a.done?'line-through':''}" style="${a.done?'color:var(--text-faint)':''}">${escapeHtml(a.action)}</span>${a.due?`<span class="chip" style="color:${(!a.done&&a.due<todayStr())?'var(--danger)':'var(--text-muted)'}">${a.due}</span>`:''}</div>`).join('')||'<p class="text-xs" style="color:var(--text-faint)">No next actions.</p>'}</div>
+      <div class="flex justify-between text-xs mb-2" style="color:var(--text-muted)"><span>Timeline Items (action plan)</span><span>${done}/${total} done (${pct}%)</span></div>
+      <div class="space-y-1.5">${timelineItems.map(a=>{const done=a.status==='done';return `<div class="flex items-center gap-2 text-sm" style="color:var(--text)"><i class="fa-${done?'solid fa-circle-check':'regular fa-circle'}" style="color:${done?'var(--success)':'var(--text-faint)'}"></i><span class="flex-1 ${done?'line-through':''}" style="${done?'color:var(--text-faint)':''}">${escapeHtml(a.text)}</span>${a.date?`<span class="chip" style="color:${(!done&&a.date<todayStr())?'var(--danger)':'var(--text-muted)'}">${a.date}</span>`:''}</div>`;}).join('')||'<p class="text-xs" style="color:var(--text-faint)">No timeline items yet.</p>'}</div>
     </div>
     ${editable?`<button onclick="closeDetail();openDealModal(${d.id})" class="btn-primary w-full text-sm py-2.5 rounded-lg"><i class="fa-solid fa-pen mr-1.5"></i>Edit Opportunity</button>`
       :CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE)?`<button onclick="closeDetail();openDealModal(${d.id})" class="btn-primary w-full text-sm py-2.5 rounded-lg"><i class="fa-solid fa-list-check mr-1.5"></i>Team Tasks</button>`
@@ -1778,14 +1865,16 @@ function openDealModal(id){
   document.getElementById('dealProgressLabel').textContent=d?d.progress:0;
   document.getElementById('dealIsBlocked').checked=d?!!d.is_blocked:false;
   document.getElementById('dealBlockerDesc').value=d?(d.blocker_description||''):'';
+  document.getElementById('dealIsClosedLost').checked=d?!!d.is_closed_lost:false;
+  document.getElementById('dealClosedLostReason').value=d?(d.closed_lost_reason||''):'';
   document.getElementById('dealStrategy').value=d?(d.strategy||''):'';
   document.getElementById('dealExpectedPO').value=d?(d.expected_po_date||''):'';
   document.getElementById('dealExpectedRevenue').value=d?(d.expected_revenue_date||''):'';
-  nextActionsDraft=d?JSON.parse(JSON.stringify(d.next_actions)):[];
+  timelineItemsDraft=normalizeTimelineItems(d?d.next_actions:[]);
   proofsDraft=normalizeProofs(d?d.proofs:{});
-  renderNextActionsDraft();
+  renderTimelineItemsDraft();
   renderProofsDraft();
-  loadTeamTasks(d?d.id:null);
+  loadTeamTasks(d?d.id:null, d?d.pod:null);
   switchModalTab(restricted?'teamtasks':'details');
   openModal('dealModal');
 }
@@ -1864,7 +1953,9 @@ function renderProofsDraft(){
   renderPlannedSteps();
 }
 
-/* Action Plan tab: every proof entry currently marked "Planned", across all 8 proofs */
+/* Action Plan tab: every proof entry currently marked "Planned", across all 8 proofs.
+   Shown for reference only - it no longer feeds the Timeline, which is now driven
+   solely by the deal's own Timeline Items (see renderTimelineItemsDraft/buildTimelineEntries). */
 function renderPlannedSteps(){
   const rows=[];
   PROOF_FRAMEWORK.forEach((p,i)=>{
@@ -1887,100 +1978,82 @@ function renderPlannedSteps(){
     proofsDraft[e.target.dataset.key].entries[e.target.dataset.ei].status=e.target.value; renderProofsDraft();
   }));
   updateActionPlanBadge();
-  lastPlannedRows=rows;
-  renderTimeline(rows);
 }
 function updateActionPlanBadge(){
   const planned=Object.values(proofsDraft).reduce((s,it)=>s+(it.entries||[]).filter(e=>e.status==='planned').length,0);
-  const openActions=nextActionsDraft.filter(a=>!a.done).length;
-  document.getElementById('mtabApBadge').textContent=String(planned+openActions);
+  const openItems=timelineItemsDraft.filter(a=>a.status!=='done').length;
+  document.getElementById('mtabApBadge').textContent=String(planned+openItems);
 }
 
 const TIMELINE_TYPE_META = {
-  step:{color:'var(--primary)', label:'Planned step'},
-  po:{color:'#8b3fd6', label:'Expected PO'},
-  revenue:{color:'var(--success)', label:'Revenue booking'},
+  step:{icon:'fa-calendar-days', color:'var(--primary)'},
+  po:{icon:'fa-file-signature', color:'#8b3fd6'},
+  revenue:{icon:'fa-sack-dollar', color:'var(--success)'},
 };
-function timelineDateToTs(d){ return new Date(d+'T00:00:00').getTime(); }
-function timelineTruncate(s,n){ s=String(s||''); return s.length>n ? s.slice(0,n-1)+'…' : s; }
-/* Planned execution steps + the PO / revenue-booking milestones, laid out along a single
-   horizontal axis from today through to the end of the project. `plannedRows` is the same
-   list already computed by renderPlannedSteps() ({p,i,ei,e}), reused so both stay in sync. */
-function renderTimeline(plannedRows){
-  const el=document.getElementById('actionTimeline'); if(!el) return;
-  const items=(plannedRows||[]).filter(r=>r.e.date).map(({p,i,e})=>({
-    date:e.date, endDate:e.end||e.date, type:'step',
-    label:e.text, sub:`${i+1}. ${p.name.replace('Proof of ','')}`,
+/* Vertical timeline: the deal's own Timeline Items plus the PO / revenue-booking
+   milestones, sorted chronologically from today through to the end of the project.
+   Deliberately independent of the Execution Framework / Planned execution steps -
+   Timeline Items are a separate, directly-edited list (see renderTimelineItemsDraft). */
+function buildTimelineEntries(){
+  const items=(timelineItemsDraft||[]).filter(it=>it.date).map(it=>({
+    date:it.date, endDate:it.end||it.date, type:'step',
+    label:it.text, sub:(ENTRY_STATUS_META[it.status]||ENTRY_STATUS_META.not_started).label,
+    done:it.status==='done',
   }));
   const poDate=document.getElementById('dealExpectedPO').value;
   const revDate=document.getElementById('dealExpectedRevenue').value;
-  if(poDate) items.push({date:poDate, endDate:poDate, type:'po', label:'Expected PO received', sub:'Milestone'});
-  if(revDate) items.push({date:revDate, endDate:revDate, type:'revenue', label:'Revenue booking', sub:'Milestone'});
-
-  if(!items.length){
-    el.innerHTML=`<p class="text-xs" style="color:var(--text-faint)">No planned dates yet — add a planned execution step with a date, or set a milestone above, to see the timeline.</p>`;
+  if(poDate) items.push({date:poDate, endDate:poDate, type:'po', label:'Expected PO received', sub:'Milestone', done:false});
+  if(revDate) items.push({date:revDate, endDate:revDate, type:'revenue', label:'Revenue booking', sub:'Milestone', done:false});
+  items.sort((a,b)=>a.date.localeCompare(b.date));
+  return items;
+}
+function refreshTimeline(){ renderTimeline(buildTimelineEntries()); }
+function renderTimeline(items){
+  const el=document.getElementById('actionTimeline'); if(!el) return;
+  if(!items||!items.length){
+    el.innerHTML=`<p class="text-xs" style="color:var(--text-faint)">No dated Timeline Items yet — add one below, or set a milestone above, to see the timeline.</p>`;
     return;
   }
-  items.sort((a,b)=>a.date.localeCompare(b.date));
   const today=todayStr();
-
-  const allTs=[today, ...items.map(it=>it.date)].map(timelineDateToTs);
-  let minTs=Math.min(...allTs), maxTs=Math.max(...allTs);
-  if(minTs===maxTs) maxTs=minTs+86400000;
-
-  const W=Math.max(680, 110+items.length*95);
-  const H=190, padL=36, padR=36, lineY=150;
-  const usableW=W-padL-padR;
-  const xFor=ts=>padL+((ts-minTs)/(maxTs-minTs))*usableW;
-  const todayX=xFor(timelineDateToTs(today)).toFixed(1);
-
-  let svg=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;display:block">`;
-  svg+=`<line x1="${padL}" y1="${lineY}" x2="${W-padR}" y2="${lineY}" stroke="var(--border)" stroke-width="2"/>`;
-  svg+=`<line x1="${todayX}" y1="${lineY-8}" x2="${todayX}" y2="${H-16}" stroke="var(--danger)" stroke-width="1.5" stroke-dasharray="3,3"/>`;
-  svg+=`<circle cx="${todayX}" cy="${lineY}" r="3.5" fill="var(--danger)"/>`;
-  svg+=`<text x="${todayX}" y="${H-4}" font-size="10" font-weight="600" fill="var(--danger)" text-anchor="middle">Today</text>`;
-
-  items.forEach(it=>{
-    const x=xFor(timelineDateToTs(it.date)).toFixed(1);
+  const rowsHtml=items.map(it=>{
     const meta=TIMELINE_TYPE_META[it.type];
-    const big=it.type!=='step';
-    const overdue=it.type==='step' && it.date<today;
-    const color=overdue?'var(--danger)':meta.color;
-    const r=big?7:5;
-    const label=escapeHtml(timelineTruncate(it.label,26));
+    const overdue=it.type==='step' && !it.done && it.date<today;
     const range=it.endDate!==it.date?`${it.date} → ${it.endDate}`:it.date;
-    svg+=`<g>
-      ${big?`<circle cx="${x}" cy="${lineY}" r="${r+5}" fill="${color}" opacity=".18"/>`:''}
-      <circle cx="${x}" cy="${lineY}" r="${r}" fill="${color}" stroke="var(--surface)" stroke-width="2"/>
-      <text x="${x}" y="${lineY-14}" font-size="10" text-anchor="start" transform="rotate(-38 ${x} ${lineY-14})">
-        <tspan font-weight="700" fill="var(--text)">${escapeHtml(it.date)}</tspan>
-        <tspan x="${x}" dy="12" font-size="9" fill="var(--text-muted)">${label}</tspan>
-      </text>
-      <title>${escapeHtml(it.sub)}: ${escapeHtml(it.label)} (${escapeHtml(range)})</title>
-    </g>`;
-  });
-  svg+='</svg>';
-
-  el.innerHTML=`
-    <div style="overflow-x:auto">
-      <div style="min-width:${W}px">${svg}</div>
-    </div>
-    <div class="flex flex-wrap gap-3 mt-2 text-[10px]" style="color:var(--text-muted)">
-      <span class="inline-flex items-center gap-1.5"><span class="timeline-legend-dot" style="background:var(--primary)"></span>Planned step</span>
-      <span class="inline-flex items-center gap-1.5"><span class="timeline-legend-dot" style="background:#8b3fd6"></span>Expected PO</span>
-      <span class="inline-flex items-center gap-1.5"><span class="timeline-legend-dot" style="background:var(--success)"></span>Revenue booking</span>
-      <span class="inline-flex items-center gap-1.5"><span class="timeline-legend-dot" style="background:var(--danger)"></span>Overdue / Today</span>
+    return `<div class="timeline-row">
+      <div class="timeline-dot" style="background:${overdue?'var(--danger)':meta.color}"><i class="fa-solid ${meta.icon}"></i></div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="chip" style="color:${overdue?'var(--danger)':'var(--text-muted)'};border-color:${overdue?'var(--danger)':'var(--border)'}">${overdue?'⚠ ':''}${escapeHtml(range)}</span>
+        <span class="text-[10px]" style="color:var(--text-faint)">${escapeHtml(it.sub)}</span>
+      </div>
+      <p class="text-sm mt-0.5" style="color:var(--text)">${escapeHtml(it.label)}</p>
     </div>`;
+  });
+  // Insert a "Today" marker at the point in the sorted list where dates cross into the future.
+  let insertAt=items.findIndex(it=>it.date>=today);
+  if(insertAt===-1) insertAt=items.length;
+  const todayHtml=`<div class="timeline-today-row"><span class="text-[11px] font-medium" style="color:var(--primary)">Today — ${today}</span></div>`;
+  rowsHtml.splice(insertAt, 0, todayHtml);
+  el.innerHTML=`<div class="timeline-track">${rowsHtml.join('')}</div>`;
 }
-document.getElementById('dealExpectedPO').addEventListener('change',()=>renderTimeline(lastPlannedRows));
-document.getElementById('dealExpectedRevenue').addEventListener('change',()=>renderTimeline(lastPlannedRows));
+document.getElementById('dealExpectedPO').addEventListener('change',refreshTimeline);
+document.getElementById('dealExpectedRevenue').addEventListener('change',refreshTimeline);
 
 /* ================= TEAM TASKS (bridge to Solution / Project / Product) ================= */
 const TASK_TEAM_META = {
+  sales:{label:'Sales', color:'#fff', bg:'#5f6b7a'},
   solution:{label:'Solution', color:'#fff', bg:'#8b3fd6'},
   project:{label:'Project', color:'#fff', bg:'#0972d3'},
   product:{label:'Product', color:'#fff', bg:'#037f51'},
 };
+function taskFromToChips(t){
+  const fromM=TASK_TEAM_META[t.source_team]||TASK_TEAM_META.sales, toM=TASK_TEAM_META[t.team];
+  const fromWho=t.created_by?` <span style="opacity:.85">· ${escapeHtml(t.created_by)}</span>`:'';
+  return `<span class="chip" style="background:${fromM.bg};color:${fromM.color};border-color:transparent" title="Filed by">${fromM.label}${fromWho}</span>
+    <i class="fa-solid fa-arrow-right-long text-[9px]" style="color:var(--text-faint)"></i>
+    <span class="chip" style="background:${toM.bg};color:${toM.color};border-color:transparent" title="Assigned to team">${toM.label}</span>
+    ${t.assigned_to?`<span class="chip" style="color:var(--text)" title="Assigned to">
+      <i class="fa-solid fa-user text-[9px] mr-1" style="color:var(--text-faint)"></i>${escapeHtml(t.assigned_to)}</span>`:''}`;
+}
 const TASK_STATUS_META = {
   not_started:{label:'Not started', color:'var(--text-faint)', bg:'var(--surface-3)'},
   in_progress:{label:'In progress', color:'#fff', bg:'var(--primary)'},
@@ -1988,14 +2061,55 @@ const TASK_STATUS_META = {
   needs_discussion:{label:'Needs discussion', color:'#fff', bg:'var(--warning)'},
   done:{label:'Done', color:'#fff', bg:'var(--success)'},
 };
+/* Searchable "assigned to" picker over ASSIGNABLE_USERS (every role except admin/
+   pod_head/management in the deal's own POD) — not free text: the typed value
+   only commits when it exactly matches a real user, picked from the dropdown or
+   typed in full. */
+function wireAssigneeCombo(container, currentValue, onCommit){
+  const input=container.querySelector('.assignee-input'), dropdown=container.querySelector('.assignee-dropdown');
+  if(!input || !dropdown || input.disabled) return;
+  input.dataset.committed = currentValue||'';
+  function showOptions(){
+    const q=input.value.trim().toLowerCase();
+    const matches=ASSIGNABLE_USERS.filter(u=>u.full_name.toLowerCase().includes(q)).slice(0,8);
+    dropdown.innerHTML = matches.length
+      ? matches.map(u=>`<div class="assignee-opt" data-name="${escapeHtml(u.full_name)}">${escapeHtml(u.full_name)} <span style="color:var(--text-faint)">· ${escapeHtml(TASK_TEAM_META[u.role]?.label||u.role)}</span></div>`).join('')
+      : `<div class="assignee-opt" style="color:var(--text-faint);cursor:default">No matching users</div>`;
+    dropdown.querySelectorAll('.assignee-opt[data-name]').forEach(opt=>opt.addEventListener('mousedown',ev=>{
+      ev.preventDefault();
+      const name=opt.dataset.name;
+      input.value=name; input.dataset.committed=name; dropdown.style.display='none';
+      onCommit(name);
+    }));
+    dropdown.style.display='';
+  }
+  input.addEventListener('focus',showOptions);
+  input.addEventListener('input',showOptions);
+  input.addEventListener('blur',()=>{
+    setTimeout(()=>{ dropdown.style.display='none'; }, 150);
+    const typed=input.value.trim(), committed=input.dataset.committed||'';
+    if(!ASSIGNABLE_USERS.some(u=>u.full_name===typed)){
+      if(committed) showToast('Please pick a user from the list',true);
+      input.value=committed;
+    } else if(typed!==committed){
+      input.dataset.committed=typed; onCommit(typed);
+    }
+  });
+}
+function resetAssigneeCombo(container){
+  const input=container.querySelector('.assignee-input');
+  if(input){ input.value=''; input.dataset.committed=''; }
+}
 let dealTasksDraft=[], currentTaskDealId=null;
 
-async function loadTeamTasks(dealId){
+async function loadTeamTasks(dealId, dealPod){
   currentTaskDealId=dealId;
   const note=document.getElementById('teamTasksNewDealNote'), body=document.getElementById('teamTasksBody');
-  if(!dealId){ dealTasksDraft=[]; note.style.display=''; body.style.display='none'; renderTeamTasksBadge(); return; }
+  if(!dealId){ dealTasksDraft=[]; ASSIGNABLE_USERS=[]; note.style.display=''; body.style.display='none'; renderTeamTasksBadge(); return; }
   note.style.display='none'; body.style.display='';
   try{ dealTasksDraft=await api(`/api/deals/${dealId}/tasks`); }catch(e){ dealTasksDraft=[]; }
+  const pod = dealPod || (dealTasksDraft[0] && dealTasksDraft[0].pod) || ENGINE1_POD_FILTER || '';
+  try{ ASSIGNABLE_USERS = pod ? await api(`/api/assignable_users?pod=${pod}`) : []; }catch(e){ ASSIGNABLE_USERS=[]; }
   renderTeamTasks();
 }
 function renderTeamTasksBadge(){
@@ -2005,25 +2119,34 @@ function renderTeamTasks(){
   const list=document.getElementById('teamTasksList');
   const isCrossFunctional=CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE);
   list.innerHTML = dealTasksDraft.map(t=>{
-    const tm=TASK_TEAM_META[t.team], sm=TASK_STATUS_META[t.status]||TASK_STATUS_META.not_started;
+    const sm=TASK_STATUS_META[t.status]||TASK_STATUS_META.not_started;
     const rowEditable = !isCrossFunctional || t.team===ROLE;
     const overdue = t.due && t.status!=='done' && t.due<todayStr();
     return `<div class="rounded-lg p-2.5" style="border:1px solid var(--border)">
+      <div class="flex items-center gap-1.5 mb-1">${taskFromToChips(t)}</div>
       <div class="flex items-center gap-2 mb-1.5">
-        <span class="chip" style="background:${tm.bg};color:${tm.color};border-color:transparent">${tm.label}</span>
         <span class="text-sm flex-1" style="color:var(--text)">${escapeHtml(t.text)}</span>
         <select class="tt-status field text-xs px-2 py-1" data-id="${t.id}" ${rowEditable?'':'disabled'} style="width:150px;background:${sm.bg};color:${sm.color};border-color:transparent">
           ${Object.entries(TASK_STATUS_META).map(([v,m])=>`<option value="${v}" ${t.status===v?'selected':''}>${m.label}</option>`).join('')}
         </select>
         ${rowEditable?`<button type="button" class="tt-del" data-id="${t.id}" style="color:var(--text-faint)" title="Remove"><i class="fa-solid fa-xmark"></i></button>`:`<span style="width:16px"></span>`}
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 mb-1.5">
+        <div class="assignee-combo tt-assignee-combo" style="position:relative;width:170px" data-id="${t.id}">
+          <input type="text" class="assignee-input tt-assignee field px-2 py-1 text-xs w-full" ${rowEditable?'':'disabled'} placeholder="Assigned to — search users..." title="Who this task is targeted to" autocomplete="off" value="${escapeHtml(t.assigned_to||'')}">
+          <div class="assignee-dropdown" style="display:none"></div>
+        </div>
         <input type="text" class="tt-note field flex-1 px-2 py-1 text-xs" data-id="${t.id}" ${rowEditable?'':'disabled'} placeholder="Note — what's the status, or what needs to be discussed..." value="${escapeHtml(t.note||'')}">
         <input type="date" class="tt-due field px-2 py-1 text-xs" data-id="${t.id}" ${rowEditable?'':'disabled'} style="width:140px;${overdue?'color:var(--danger)':''}" title="Target date to resolve this by" value="${t.due||''}">
       </div>
     </div>`;
   }).join('') || `<p class="text-xs" style="color:var(--text-faint)">No team tasks yet — add what Solution, Project or Product need to follow up on below.</p>`;
   list.querySelectorAll('.tt-status').forEach(s=>s.addEventListener('change',e=>saveTaskField(parseInt(e.target.dataset.id),{status:e.target.value})));
+  list.querySelectorAll('.tt-assignee-combo').forEach(combo=>{
+    const id=parseInt(combo.dataset.id);
+    const current=dealTasksDraft.find(t=>t.id===id)?.assigned_to||'';
+    wireAssigneeCombo(combo, current, name=>saveTaskField(id,{assigned_to:name}));
+  });
   list.querySelectorAll('.tt-note').forEach(inp=>inp.addEventListener('change',e=>saveTaskField(parseInt(e.target.dataset.id),{note:e.target.value})));
   list.querySelectorAll('.tt-due').forEach(inp=>inp.addEventListener('change',e=>saveTaskField(parseInt(e.target.dataset.id),{due:e.target.value})));
   list.querySelectorAll('.tt-del').forEach(b=>b.addEventListener('click',()=>deleteTask(parseInt(b.dataset.id))));
@@ -2043,20 +2166,24 @@ async function deleteTask(taskId){
     renderTeamTasks();
   }catch(err){ showToast(err.message,true); }
 }
+wireAssigneeCombo(document.querySelector('#mtab-teamtasks .assignee-combo'), '', name=>{});
 document.getElementById('addTaskBtn').addEventListener('click',async()=>{
   if(!currentTaskDealId) return;
   const txt=document.getElementById('newTaskText'), team=document.getElementById('newTaskTeam');
+  const assignee=document.getElementById('newTaskAssignee');
   const status=document.getElementById('newTaskStatus'), due=document.getElementById('newTaskDue');
   const v=txt.value.trim(); if(!v) return;
+  const who=assignee.value.trim();
+  if(!ASSIGNABLE_USERS.some(u=>u.full_name===who)){ showToast('Search and pick who this task is assigned to',true); return; }
   try{
-    const created=await api(`/api/deals/${currentTaskDealId}/tasks`,{method:'POST',body:JSON.stringify({text:v,team:team.value,status:status.value,due:due.value})});
-    dealTasksDraft.push(created); txt.value=''; status.value='not_started'; due.value=''; renderTeamTasks();
+    const created=await api(`/api/deals/${currentTaskDealId}/tasks`,{method:'POST',body:JSON.stringify({text:v,team:team.value,assigned_to:who,status:status.value,due:due.value})});
+    dealTasksDraft.push(created); txt.value=''; resetAssigneeCombo(assignee.closest('.assignee-combo')); status.value='not_started'; due.value=''; renderTeamTasks();
   }catch(err){ showToast(err.message,true); }
 });
 document.getElementById('newTaskText').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); document.getElementById('addTaskBtn').click(); } });
 
 /* ---------- Weekly Meeting (admin + management): cross-team sync view ---------- */
-let wmStatusFilter=null;
+let wmStatusFilter=null, wmExpandedThreads=new Set();
 async function renderWeeklyMeeting(){
   const team=document.getElementById('wmTeamFilter').value;
   const params=new URLSearchParams({scope:'all'}); if(team) params.set('team',team);
@@ -2077,39 +2204,196 @@ async function renderWeeklyMeeting(){
 
   const visible = wmStatusFilter ? tasks.filter(t=>t.status===wmStatusFilter) : tasks;
   const rank=s=>({blocked:0,needs_discussion:1,in_progress:2,not_started:3,done:4}[s]??5);
-  // Closest deadline first (done tasks sink to the bottom regardless of date) so the
-  // meeting can work top-down on what needs to be solved soonest; status breaks ties.
-  const sorted=[...visible].sort((a,b)=>
-    (a.status==='done')-(b.status==='done')
-    || (a.due||'9999-99-99').localeCompare(b.due||'9999-99-99')
-    || rank(a.status)-rank(b.status)
-    || (a.deal_name||'').localeCompare(b.deal_name||''));
   const today=todayStr();
-  document.getElementById('wmList').innerHTML = sorted.map(t=>{
-    const tm=TASK_TEAM_META[t.team], sm=TASK_STATUS_META[t.status]||TASK_STATUS_META.not_started;
+
+  const isPodAdminRole=r=>r==='admin'||r==='pod_head';
+  const canEditTask=t=>{
+    if(CROSS_FUNCTIONAL_ROLES_JS.includes(ROLE)) return t.team===ROLE;
+    if(ROLE==='super_admin') return true;
+    if(isPodAdminRole(ROLE)) return t.pod===POD;
+    if(ROLE==='account_manager') return (t.assigned_am||'')===FULLNAME;
+    if(ROLE==='management'||ROLE==='engine1_exec') return true;
+    return false;
+  };
+  const isReviewer=isPodAdminRole(ROLE)||ROLE==='super_admin'||ROLE==='management'||ROLE==='engine1_exec';
+  const canDelete=isPodAdminRole(ROLE)||ROLE==='super_admin';
+
+  // Group by opportunity into a "thread" — everything Solution/Project/Product/Sales
+  // flagged on the same deal reads together, so the meeting can work project-by-
+  // project. Threads render as <details>, collapsed by default so the board opens
+  // to a scannable list of projects rather than every task at once; expand state
+  // persists per deal (wmExpandedThreads) across re-renders within the session.
+  function groupByDeal(items){
+    const g={};
+    items.forEach(t=>{ (g[t.deal_id]=g[t.deal_id]||{deal_id:t.deal_id,deal_name:t.deal_name,customer:t.customer,assigned_am:t.assigned_am,pod_label:t.pod_label,tasks:[]}).tasks.push(t); });
+    return Object.values(g);
+  }
+  function taskRow(t){
+    const sm=TASK_STATUS_META[t.status]||TASK_STATUS_META.not_started;
     const overdue=t.due && t.status!=='done' && t.due<today;
-    return `<div class="rounded-lg p-3" style="background:var(--surface-2)">
-      <div class="flex items-center gap-2 mb-1">
-        <span class="chip" style="background:${tm.bg};color:${tm.color};border-color:transparent">${tm.label}</span>
-        <span class="chip" style="background:${sm.bg};color:${sm.color};border-color:transparent">${sm.label}</span>
+    const editable=canEditTask(t);
+    return `<div class="px-3 py-2.5">
+      <div class="flex items-center gap-2 mb-1 flex-wrap">
+        ${taskFromToChips(t)}
         <span class="text-sm flex-1" style="color:var(--text)">${escapeHtml(t.text)}</span>
         ${t.due?`<span class="chip" style="color:${overdue?'var(--danger)':'var(--text-muted)'};border-color:${overdue?'var(--danger)':'var(--border)'}">${overdue?'⚠ ':''}${t.due}</span>`:''}
+        ${canDelete?`<button type="button" class="wm-del text-xs" data-id="${t.id}" style="color:var(--text-faint)" title="Delete from Weekly Meeting"><i class="fa-solid fa-trash"></i></button>`:''}
       </div>
-      <div class="flex items-center gap-2 text-xs" style="color:var(--text-muted)">
-        ${PODLESS_ROLES_JS.includes(ROLE)&&t.pod_label?`<span class="chip" style="color:var(--primary);border-color:var(--primary)">${escapeHtml(t.pod_label)}</span>`:''}
-        <span class="font-medium" style="color:var(--text)">${escapeHtml(t.deal_name)}</span>
-        <span>${escapeHtml(t.customer||'')}</span>
-        <span class="chip" style="color:var(--text-muted)">${escapeHtml((t.assigned_am||'').split(' ')[0])}</span>
+      <div class="flex items-center gap-2 mb-1.5 flex-wrap">
+        <select class="wm-status field text-xs px-2 py-1" data-id="${t.id}" ${editable?'':'disabled'} style="width:150px;background:${sm.bg};color:${sm.color};border-color:transparent">
+          ${Object.entries(TASK_STATUS_META).map(([v,m])=>`<option value="${v}" ${t.status===v?'selected':''}>${m.label}</option>`).join('')}
+        </select>
+        <input type="text" class="wm-note field flex-1 px-2 py-1 text-xs" data-id="${t.id}" ${editable?'':'disabled'} placeholder="Note — discussed in weekly review, next step, blocker..." value="${escapeHtml(t.note||'')}">
       </div>
-      ${t.note?`<p class="text-xs mt-1.5" style="color:var(--text-muted);white-space:pre-wrap"><i class="fa-solid fa-message mr-1" style="color:var(--text-faint)"></i>${escapeHtml(t.note)}</p>`:''}
+      ${isReviewer?`<div class="flex items-center gap-1.5">
+        <button type="button" class="wm-mark-solved text-[11px] px-2 py-1 rounded-md flex items-center gap-1" data-id="${t.id}" ${t.status==='done'?'disabled':''} style="background:${t.status==='done'?'var(--surface-3)':'var(--success)'};color:${t.status==='done'?'var(--text-faint)':'#fff'}"><i class="fa-solid fa-circle-check"></i> ${t.status==='done'?'Solved':'Mark solved'}</button>
+        <button type="button" class="wm-mark-discuss text-[11px] px-2 py-1 rounded-md flex items-center gap-1" data-id="${t.id}" ${t.status==='needs_discussion'?'disabled':''} style="background:${t.status==='needs_discussion'?'var(--surface-3)':'var(--warning)'};color:${t.status==='needs_discussion'?'var(--text-faint)':'#fff'}"><i class="fa-solid fa-comments"></i> ${t.status==='needs_discussion'?'Needs discussion':'Needs further discussion'}</button>
+      </div>`:''}
     </div>`;
-  }).join('') || `<p class="text-xs" style="color:var(--text-faint)">Nothing to show${team?` for ${escapeHtml(TASK_TEAM_META[team]?.label||team)}`:''}.</p>`;
+  }
+  function threadHtml(th, accentKey){
+    const openKey=`${accentKey}:${th.deal_id}`;
+    return `<details class="widget rounded-lg wm-thread" style="background:var(--surface-2);border:1px solid var(--border)" data-key="${openKey}" ${wmExpandedThreads.has(openKey)?'open':''}>
+      <summary class="flex items-center gap-2 px-3 py-2 flex-wrap" style="border-bottom:1px solid var(--border)">
+        <i class="fa-solid fa-chevron-right chev text-[10px]" style="color:var(--text-faint)"></i>
+        <i class="fa-solid fa-comments text-xs" style="color:var(--text-faint)"></i>
+        <span class="text-sm font-medium" style="color:var(--text)">${escapeHtml(th.deal_name)}</span>
+        <span class="text-xs" style="color:var(--text-muted)">${escapeHtml(th.customer||'')}</span>
+        ${PODLESS_ROLES_JS.includes(ROLE)&&th.pod_label?`<span class="chip" style="color:var(--primary);border-color:var(--primary)">${escapeHtml(th.pod_label)}</span>`:''}
+        <span class="chip" style="color:var(--text-muted)">${escapeHtml((th.assigned_am||'').split(' ')[0])}</span>
+        <span class="flex-1"></span>
+        <span class="chip" style="color:var(--text-muted)">${th.tasks.length} item${th.tasks.length===1?'':'s'}</span>
+      </summary>
+      <div class="divide-y" style="border-color:var(--border)">${th.tasks.map(taskRow).join('')}</div>
+    </details>`;
+  }
+
+  const openTasks=visible.filter(t=>t.status!=='done'), doneTasks=visible.filter(t=>t.status==='done');
+  const openThreads=groupByDeal(openTasks).map(th=>{
+    th.tasks.sort((a,b)=>(a.due||'9999-99-99').localeCompare(b.due||'9999-99-99') || rank(a.status)-rank(b.status));
+    th.minRank=Math.min(...th.tasks.map(t=>rank(t.status)));
+    th.minDue=th.tasks.reduce((m,t)=>(t.due&&(!m||t.due<m))?t.due:m,null);
+    return th;
+  }).sort((a,b)=> a.minRank-b.minRank || (a.minDue||'9999-99-99').localeCompare(b.minDue||'9999-99-99') || (a.deal_name||'').localeCompare(b.deal_name||''));
+  const doneThreads=groupByDeal(doneTasks).sort((a,b)=>(a.deal_name||'').localeCompare(b.deal_name||''));
+
+  document.getElementById('wmList').innerHTML =
+    openThreads.map(th=>threadHtml(th,'open')).join('')
+    || `<p class="text-xs" style="color:var(--text-faint)">Nothing open${team?` for ${escapeHtml(TASK_TEAM_META[team]?.label||team)}`:''}.</p>`;
+
+  const solvedSection=document.getElementById('wmSolvedSection');
+  document.getElementById('wmSolvedCount').textContent=String(doneTasks.length);
+  if(doneThreads.length){
+    solvedSection.style.display='';
+    document.getElementById('wmSolvedList').innerHTML=doneThreads.map(th=>threadHtml(th,'solved')).join('');
+  } else {
+    solvedSection.style.display='none';
+  }
+
+  document.querySelectorAll('#tab-weeklymeeting .wm-thread').forEach(det=>det.addEventListener('toggle',()=>{
+    if(det.open) wmExpandedThreads.add(det.dataset.key); else wmExpandedThreads.delete(det.dataset.key);
+  }));
+  document.querySelectorAll('#tab-weeklymeeting .wm-status').forEach(s=>s.addEventListener('change',e=>saveWmTaskField(parseInt(e.target.dataset.id),{status:e.target.value})));
+  document.querySelectorAll('#tab-weeklymeeting .wm-mark-solved').forEach(b=>b.addEventListener('click',()=>saveWmTaskField(parseInt(b.dataset.id),{status:'done'})));
+  document.querySelectorAll('#tab-weeklymeeting .wm-mark-discuss').forEach(b=>b.addEventListener('click',()=>saveWmTaskField(parseInt(b.dataset.id),{status:'needs_discussion'})));
+  document.querySelectorAll('#tab-weeklymeeting .wm-note').forEach(inp=>inp.addEventListener('change',e=>saveWmTaskField(parseInt(e.target.dataset.id),{note:e.target.value})));
+  document.querySelectorAll('#tab-weeklymeeting .wm-del').forEach(b=>b.addEventListener('click',()=>{
+    openConfirm('Delete this task from the Weekly Meeting? This removes it entirely from the opportunity.',async()=>{
+      try{ await api(`/api/tasks/${b.dataset.id}`,{method:'DELETE'}); renderWeeklyMeeting(); }
+      catch(err){ showToast(err.message,true); }
+    });
+  }));
+}
+async function saveWmTaskField(taskId,patch){
+  try{ await api(`/api/tasks/${taskId}`,{method:'PUT',body:JSON.stringify(patch)}); renderWeeklyMeeting(); }
+  catch(err){ showToast(err.message,true); }
 }
 document.getElementById('wmTeamFilter').addEventListener('change',renderWeeklyMeeting);
 document.getElementById('wmFilterClear').addEventListener('click',()=>{ wmStatusFilter=null; renderWeeklyMeeting(); });
 [['wmKpiBlockedCard','blocked'],['wmKpiDiscussCard','needs_discussion'],['wmKpiProgressCard','in_progress'],['wmKpiDoneCard','done']].forEach(([id,key])=>{
   document.getElementById(id).addEventListener('click',()=>{ wmStatusFilter = wmStatusFilter===key?null:key; renderWeeklyMeeting(); });
 });
+
+/* ---------- Weekly summary: what happened in the last 7 days, and what's planned
+   for the next 7 days, across every team task, Timeline Item, and Execution
+   Framework entry on every opportunity — regardless of the team filter above.
+   Grouped by opportunity and condensed to one line per item so it stays short
+   enough to actually walk through in the meeting. ---------- */
+async function buildWeeklySummary(){
+  const today=todayStr();
+  const weekAgoDate=new Date(); weekAgoDate.setDate(weekAgoDate.getDate()-7);
+  const weekAheadDate=new Date(); weekAheadDate.setDate(weekAheadDate.getDate()+7);
+  const weekAgo=ymd(weekAgoDate), weekAhead=ymd(weekAheadDate);
+  const inPast=d=> !!d && d>=weekAgo && d<=today;
+  const inFuture=d=> !!d && d>=today && d<=weekAhead;
+  const doneItems=[], plannedItems=[];
+
+  const taskParams=new URLSearchParams({scope:'all'});
+  if(PODLESS_ROLES_JS.includes(ROLE) && ENGINE1_POD_FILTER) taskParams.set('pod',ENGINE1_POD_FILTER);
+  let tasks=[];
+  try{ tasks=await api('/api/tasks?'+taskParams.toString()); }catch(e){ tasks=[]; }
+  tasks.forEach(t=>{
+    const updated=(t.updated_at||'').slice(0,10);
+    const kind=`${TASK_TEAM_META[t.team]?.label||t.team} Team Task`;
+    const ctx={deal_name:t.deal_name||'', customer:t.customer||''};
+    if(t.status==='done' && inPast(updated)) doneItems.push({text:t.text, date:updated, ctx, kind});
+    else if(t.status!=='done' && inFuture(t.due)) plannedItems.push({text:t.text, date:t.due, ctx, kind});
+  });
+
+  (ALL_DEALS||[]).forEach(d=>{
+    const ctx={deal_name:d.deal_name, customer:d.customer};
+    normalizeTimelineItems(d.next_actions).forEach(it=>{
+      if(it.status==='done' && inPast(it.date)) doneItems.push({text:it.text, date:it.date, ctx, kind:'Timeline Item'});
+      else if(it.status!=='done' && inFuture(it.date)) plannedItems.push({text:it.text, date:it.date, ctx, kind:'Timeline Item'});
+    });
+    const pr=normalizeProofs(d.proofs);
+    PROOF_FRAMEWORK.forEach((p,i)=>{
+      (pr[p.key].entries||[]).forEach(e=>{
+        if(!e.date) return;
+        const kind=`${i+1}. ${p.name.replace('Proof of ','')}`;
+        if(e.status==='done' && inPast(e.date)) doneItems.push({text:e.text, date:e.date, ctx, kind});
+        else if(e.status!=='done' && inFuture(e.date)) plannedItems.push({text:e.text, date:e.date, ctx, kind});
+      });
+    });
+  });
+
+  doneItems.sort((a,b)=>b.date.localeCompare(a.date));
+  plannedItems.sort((a,b)=>a.date.localeCompare(b.date));
+  return {doneItems, plannedItems};
+}
+function groupSummaryByDeal(items){
+  const byDeal={};
+  items.forEach(it=>{ const k=it.ctx.deal_name||'—'; (byDeal[k]=byDeal[k]||{deal_name:it.ctx.deal_name,customer:it.ctx.customer,items:[]}).items.push(it); });
+  return Object.values(byDeal);
+}
+function summaryGroupCard(group, accent){
+  return `<div class="rounded-lg p-2.5" style="background:var(--surface-2)">
+    <p class="text-sm font-medium mb-1" style="color:var(--text)">${escapeHtml(group.deal_name)}${group.customer?` <span class="text-[11px] font-normal" style="color:var(--text-faint)">· ${escapeHtml(group.customer)}</span>`:''}</p>
+    <ul class="space-y-1">
+      ${group.items.map(it=>`<li class="text-xs flex items-start gap-1.5" style="color:var(--text-muted)">
+        <span class="chip flex-shrink-0" style="color:${accent};border-color:${accent}">${escapeHtml(it.date)}</span>
+        <span><span style="color:var(--text)">${escapeHtml(it.text)}</span> <span class="text-[10px]" style="color:var(--text-faint)">(${escapeHtml(it.kind)})</span></span>
+      </li>`).join('')}
+    </ul>
+  </div>`;
+}
+document.getElementById('wmSummaryBtn').addEventListener('click',async()=>{
+  const panel=document.getElementById('wmSummaryPanel');
+  if(panel.style.display==='none'){
+    panel.style.display='';
+    document.getElementById('wmSummaryDoneList').innerHTML='<p class="text-xs" style="color:var(--text-faint)">Loading…</p>';
+    document.getElementById('wmSummaryPlannedList').innerHTML='';
+    const {doneItems, plannedItems}=await buildWeeklySummary();
+    document.getElementById('wmSummaryDoneCount').textContent=String(doneItems.length);
+    document.getElementById('wmSummaryPlannedCount').textContent=String(plannedItems.length);
+    const doneGroups=groupSummaryByDeal(doneItems), plannedGroups=groupSummaryByDeal(plannedItems);
+    document.getElementById('wmSummaryDoneList').innerHTML = doneGroups.map(g=>summaryGroupCard(g,'var(--success)')).join('') || `<p class="text-xs" style="color:var(--text-faint)">Nothing marked done in the last 7 days.</p>`;
+    document.getElementById('wmSummaryPlannedList').innerHTML = plannedGroups.map(g=>summaryGroupCard(g,'var(--primary)')).join('') || `<p class="text-xs" style="color:var(--text-faint)">Nothing planned for the next 7 days.</p>`;
+  } else {
+    panel.style.display='none';
+  }
+});
+document.getElementById('wmSummaryCloseBtn').addEventListener('click',()=>{ document.getElementById('wmSummaryPanel').style.display='none'; });
 
 /* ---------- My Team Tasks (solution / project / product): personal follow-up inbox ---------- */
 let mtStatusFilter=null;
@@ -2178,29 +2462,37 @@ document.getElementById('mtFilterClear').addEventListener('click',()=>{ mtStatus
   document.getElementById(id).addEventListener('click',()=>{ mtStatusFilter = mtStatusFilter===key?null:key; renderMyTeamTasks(); });
 });
 
-document.getElementById('addActionBtn').addEventListener('click',()=>{
-  const i=document.getElementById('newActionInput'), dd=document.getElementById('newActionDue');
+document.getElementById('addTimelineItemBtn').addEventListener('click',()=>{
+  const i=document.getElementById('newTimelineItemText'), st=document.getElementById('newTimelineItemStart'),
+        en=document.getElementById('newTimelineItemEnd'), sel=document.getElementById('newTimelineItemStatus');
   const t=i.value.trim(); if(!t)return;
-  nextActionsDraft.push({action:t,done:false,due:dd.value||''}); i.value=''; dd.value=''; renderNextActionsDraft();
+  timelineItemsDraft.push({text:t,date:st.value||'',end:en.value||'',status:sel.value||'planned'});
+  i.value=''; st.value=''; en.value=''; sel.value='planned'; renderTimelineItemsDraft();
 });
-document.getElementById('newActionInput').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); document.getElementById('addActionBtn').click(); } });
-function renderNextActionsDraft(){
-  const list=document.getElementById('nextActionsList'); list.innerHTML='';
-  nextActionsDraft.forEach((a,idx)=>{
-    const row=document.createElement('div'); row.className='flex items-center gap-2';
-    row.innerHTML=`<input type="checkbox" ${a.done?'checked':''} data-idx="${idx}" class="ad-cb">
-      <span class="flex-1 text-sm ${a.done?'line-through':''}" style="color:${a.done?'var(--text-faint)':'var(--text)'}">${escapeHtml(a.action)}</span>
-      <input type="date" value="${a.due||''}" data-idx="${idx}" class="ad-due field text-xs px-2 py-1" style="width:140px" title="Target date">
-      <button type="button" data-idx="${idx}" class="rm-a" style="color:var(--text-faint)"><i class="fa-solid fa-xmark"></i></button>`;
+document.getElementById('newTimelineItemText').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); document.getElementById('addTimelineItemBtn').click(); } });
+function renderTimelineItemsDraft(){
+  const list=document.getElementById('timelineItemsList'); list.innerHTML='';
+  timelineItemsDraft.forEach((it,idx)=>{
+    const em=ENTRY_STATUS_META[it.status]||ENTRY_STATUS_META.not_started;
+    const row=document.createElement('div'); row.className='flex items-center gap-1.5 flex-wrap';
+    row.innerHTML=`<select data-idx="${idx}" class="ti-status field text-[10px] px-1 py-1" style="width:106px;background:${em.bg};color:${em.color};border-color:transparent">
+        ${Object.entries(ENTRY_STATUS_META).map(([v,m])=>`<option value="${v}" ${it.status===v?'selected':''}>${m.label}</option>`).join('')}
+      </select>
+      <input type="date" value="${it.date||''}" data-idx="${idx}" class="ti-start field text-[11px] px-1.5 py-1" style="width:132px" title="Start date">
+      <span class="text-[10px]" style="color:var(--text-faint)">&rarr;</span>
+      <input type="date" value="${it.end||''}" min="${it.date||''}" data-idx="${idx}" class="ti-end field text-[11px] px-1.5 py-1" style="width:132px" title="End date (optional)">
+      <input type="text" value="${escapeHtml(it.text)}" data-idx="${idx}" class="ti-text field flex-1 px-2 py-1 text-xs" style="min-width:140px" placeholder="What's the plan...">
+      <button type="button" data-idx="${idx}" class="ti-del" style="color:var(--text-faint)" title="Remove"><i class="fa-solid fa-xmark"></i></button>`;
     list.appendChild(row);
   });
-  list.querySelectorAll('.ad-cb').forEach(cb=>cb.addEventListener('change',e=>{nextActionsDraft[e.target.dataset.idx].done=e.target.checked;renderNextActionsDraft();}));
-  list.querySelectorAll('.ad-due').forEach(inp=>inp.addEventListener('change',e=>{nextActionsDraft[e.target.dataset.idx].due=e.target.value;}));
-  list.querySelectorAll('.rm-a').forEach(b=>b.addEventListener('click',e=>{nextActionsDraft.splice(e.currentTarget.dataset.idx,1);renderNextActionsDraft();}));
-  const done=nextActionsDraft.filter(a=>a.done).length, total=nextActionsDraft.length;
-  document.getElementById('nextActionsProgress').textContent=`${done} / ${total}`;
-  document.getElementById('nextActionsBar').style.width=(total?done/total*100:0)+'%';
+  list.querySelectorAll('.ti-status').forEach(s=>s.addEventListener('change',e=>{timelineItemsDraft[e.target.dataset.idx].status=e.target.value;renderTimelineItemsDraft();}));
+  list.querySelectorAll('.ti-start').forEach(inp=>inp.addEventListener('change',e=>{timelineItemsDraft[e.target.dataset.idx].date=e.target.value;renderTimelineItemsDraft();}));
+  list.querySelectorAll('.ti-end').forEach(inp=>inp.addEventListener('change',e=>{timelineItemsDraft[e.target.dataset.idx].end=e.target.value;refreshTimeline();}));
+  list.querySelectorAll('.ti-text').forEach(inp=>inp.addEventListener('input',e=>{timelineItemsDraft[e.target.dataset.idx].text=e.target.value;}));
+  list.querySelectorAll('.ti-del').forEach(b=>b.addEventListener('click',e=>{timelineItemsDraft.splice(e.currentTarget.dataset.idx,1);renderTimelineItemsDraft();}));
+  document.getElementById('timelineItemsCount').textContent=String(timelineItemsDraft.length);
   updateActionPlanBadge();
+  refreshTimeline();
 }
 function buildDealPayload(){
   return {
@@ -2218,8 +2510,10 @@ function buildDealPayload(){
     progress:parseInt(document.getElementById('dealProgress').value),
     is_blocked:document.getElementById('dealIsBlocked').checked,
     blocker_description:document.getElementById('dealBlockerDesc').value.trim(),
+    is_closed_lost:document.getElementById('dealIsClosedLost').checked,
+    closed_lost_reason:document.getElementById('dealClosedLostReason').value.trim(),
     strategy:document.getElementById('dealStrategy').value.trim(),
-    next_actions:nextActionsDraft,
+    next_actions:timelineItemsDraft,
     proofs:proofsDraft,
     expected_po_date:document.getElementById('dealExpectedPO').value,
     expected_revenue_date:document.getElementById('dealExpectedRevenue').value,
@@ -2281,7 +2575,7 @@ async function autosaveDeal(){
 }));
 document.getElementById('dealForm').addEventListener('click',e=>{
   if(e.target.closest('#mtab-teamtasks')) return;
-  if(e.target.closest('.rm-a, .pe-del, .pe-add, #addActionBtn')) markDealDirty();
+  if(e.target.closest('.ti-del, .pe-del, .pe-add, #addTimelineItemBtn')) markDealDirty();
 });
 function attemptCloseDealModal(){
   if(!dealModalDirty){ closeModal('dealModal'); return; }
@@ -2354,8 +2648,8 @@ function renderManagement(){
       if(it.due<=hStr){ const last=(it.entries||[]).slice(-1)[0];
         items.push({due:it.due,label:`${i+1}. ${p.name.replace('Proof of ','')}${last?' — '+last.text:''}`,deal:d,proof:true}); }
     });
-    (d.next_actions||[]).forEach(a=>{ if(a.done||!a.due) return;
-      if(a.due<=hStr) items.push({due:a.due,label:a.action,deal:d,proof:false}); });
+    normalizeTimelineItems(d.next_actions).forEach(a=>{ if(a.status==='done'||!a.date) return;
+      if(a.date<=hStr) items.push({due:a.date,label:a.text,deal:d,proof:false}); });
   });
   items.sort((a,b)=>a.due.localeCompare(b.due));
   document.getElementById('mgActionCount').textContent=items.length;
@@ -2761,10 +3055,10 @@ function calendarActions(){
         });
       });
     });
-    (d.next_actions||[]).forEach(a=>{
-      if(hideDone && a.done) return;
-      out.push({ action:a.action, done:!!a.done, status:a.done?'done':'planned',
-                 start:a.due||'', end:a.due||'',
+    normalizeTimelineItems(d.next_actions).forEach(a=>{
+      if(hideDone && a.status==='done') return;
+      out.push({ action:a.text, done:a.status==='done', status:a.status,
+                 start:a.date||'', end:a.end||a.date||'',
                  dealId:d.id, dealName:d.deal_name, customer:d.customer, am:d.assigned_am,
                  kind:'action', proofName:'' });
     });
@@ -3236,6 +3530,23 @@ document.getElementById('amTargetsImportBtn').addEventListener('click',()=>{
     }catch(err){ showToast(err.message,true); }
   });
 });
+document.getElementById('allPodsImportBtn').addEventListener('click',()=>{
+  const f=document.getElementById('allPodsImportFile').files[0];
+  if(!f){ showToast('Choose the monthly .xlsx first',true); return; }
+  openConfirm(`Import Target/Performance for every POD found in "${f.name}"? This also overwrites each POD's Full-Year Target/Achieved/Recurring with the sum of its AM figures.`, async()=>{
+    try{
+      const fd=new FormData(); fd.append('file',f);
+      const res=await fetch('/api/config/am_targets/import_all_pods',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:fd});
+      const data=await res.json();
+      if(!res.ok) throw new Error(data.error||'Import failed');
+      const resEl=document.getElementById('allPodsImportResult');
+      resEl.innerHTML = Object.values(data.pods).map(p=>`<p><b style="color:var(--text)">${escapeHtml(p.pod_label)}</b>: updated ${p.updated.length} AM(s)${p.updated.length?' — '+escapeHtml(p.updated.join(', ')):''}.${p.unmatched.length?` Not matched: ${escapeHtml(p.unmatched.join(', '))}.`:''}</p>`).join('');
+      document.getElementById('allPodsImportFile').value='';
+      showToast(`Imported ${Object.keys(data.pods).length} POD(s)`);
+      await loadConfig(); renderAnalytics(); renderAmTargets();
+    }catch(err){ showToast(err.message,true); }
+  });
+});
 document.getElementById('saveAmTargetsBtn').addEventListener('click',async()=>{
   const t={},y={},r={};
   document.querySelectorAll('.am-fig-inp').forEach(i=>{
@@ -3294,7 +3605,7 @@ document.getElementById('importXlsxBtn').addEventListener('click',()=>{
       const s=data.summary;
       out.innerHTML=`<span style="color:var(--success)">Imported.</span> ${s.updated} updated, ${s.created} created, ${s.deleted} deleted, ${s.users_created} new user(s)${s.config_updated?', configuration updated':''}.`;
       showToast('Import complete');
-      await loadConfig(); await loadAMs(); await loadDeals(); if(ROLE==='admin'||ROLE==='super_admin') await loadUsers();
+      await loadConfig(); await loadAMs(); await loadDeals(); if((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin') await loadUsers();
       renderSettings();
     }catch(err){ out.innerHTML=`<span style="color:var(--danger)">${escapeHtml(err.message)}</span>`; showToast(err.message,true); }
   });
@@ -3350,7 +3661,7 @@ function openUserModal(id){
   const u=id?USERS.find(x=>x.id===id):null;
   document.getElementById('userModalTitle').textContent=u?'Edit User':'Add User';
   document.getElementById('userId').value=u?u.id:'';
-  document.getElementById('userUsername').value=u?u.username:''; document.getElementById('userUsername').disabled=!!u;
+  document.getElementById('userUsername').value=u?u.username:''; document.getElementById('userUsername').disabled = !!u && ROLE!=='super_admin';
   document.getElementById('userFullName').value=u?(u.full_name||''):'';
   document.getElementById('userPassword').value='';
   document.getElementById('userPasswordHint').textContent=u?'(blank = keep current)':'';
@@ -3375,7 +3686,7 @@ document.getElementById('userForm').addEventListener('submit',async e=>{
   const role=document.getElementById('userRole').value;
   const pod = (ROLE==='super_admin' && !PODLESS_ROLES_JS.includes(role)) ? document.getElementById('userPod').value : undefined;
   try {
-    if(id){ const p={role,full_name}; if(password)p.password=password; if(pod)p.pod=pod; await api(`/api/users/${id}`,{method:'PUT',body:JSON.stringify(p)}); showToast('User updated'); }
+    if(id){ const p={role,full_name}; if(password)p.password=password; if(pod)p.pod=pod; if(ROLE==='super_admin') p.username=username; await api(`/api/users/${id}`,{method:'PUT',body:JSON.stringify(p)}); showToast('User updated'); }
     else { if(!password){ showToast('Password required',true); return; } const p={username,password,role,full_name}; if(pod)p.pod=pod; await api('/api/users',{method:'POST',body:JSON.stringify(p)}); showToast('User created'); }
     closeModal('userModal'); await loadUsers(); await loadAMs(); renderUsersTable();
   } catch(err){ showToast(err.message,true); }
@@ -3466,17 +3777,17 @@ document.getElementById('perfExportPdfBtn').addEventListener('click',async()=>{
 
 /* ================= COMMAND PALETTE (feature search) ================= */
 const CMD_FEATURES = [
-  {label:'Management View', desc:'Executive briefing — headline, blockers, AM performance & insights', icon:'fa-briefcase', tab:'management', roles:['admin','management','engine1_exec','super_admin']},
+  {label:'Management View', desc:'Executive briefing — headline, blockers, AM performance & insights', icon:'fa-briefcase', tab:'management', roles:['admin','pod_head','management','engine1_exec','super_admin']},
   {label:'Tracker', desc:'Search, filter, sort and edit opportunities', icon:'fa-table-cells-large', tab:'tracker'},
   {label:'Calendar', desc:'Week/month view of every scheduled action item', icon:'fa-calendar-days', tab:'calendar'},
   {label:'Pipeline Analytics', desc:'Gap & targets, breakdown, execution framework, strategy, leaderboard', icon:'fa-chart-line', tab:'analytics'},
   {label:'Performance', desc:'Monthly ACH actuals, targets, pipeline cover, churn watch', icon:'fa-gauge-high', tab:'performance'},
   {label:'Lists & Automation', desc:'Engine-1-wide deal stages & strategic pillars', icon:'fa-list-check', tab:'configuration', roles:['engine1_exec','super_admin']},
-  {label:'Login Logs', desc:'Sign-in history, retention limit, export', icon:'fa-user-clock', tab:'loginlogs', roles:['admin','super_admin']},
-  {label:'Settings', desc:'Targets, AM figures, users, data backup & restore', icon:'fa-sliders', tab:'settings', roles:['admin','super_admin']},
+  {label:'Login Logs', desc:'Sign-in history, retention limit, export', icon:'fa-user-clock', tab:'loginlogs', roles:['admin','pod_head','super_admin']},
+  {label:'Settings', desc:'Targets, AM figures, users, data backup & restore', icon:'fa-sliders', tab:'settings', roles:['admin','pod_head','super_admin']},
 ];
 const CMD_ACTIONS = [
-  {label:'Add Opportunity', desc:'Create a new deal', icon:'fa-plus', roles:['admin','account_manager','super_admin'],
+  {label:'Add Opportunity', desc:'Create a new deal', icon:'fa-plus', roles:['admin','pod_head','account_manager','super_admin'],
    action:()=>{ switchTab('tracker'); openDealModal(null); }},
   {label:'Export Tracker report (PDF)', desc:'Download the full Tracker PDF report', icon:'fa-file-pdf',
    action:()=>{ switchTab('tracker'); document.getElementById('exportPdfBtn').click(); }},

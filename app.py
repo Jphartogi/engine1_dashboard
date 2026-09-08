@@ -17,6 +17,7 @@ that POD's management is read-only within it.
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 from datetime import datetime, date, timedelta, timezone
@@ -35,7 +36,7 @@ app = Flask(__name__)
 # In-memory token store: token -> {user_id, username, role, full_name}
 TOKENS = {}
 
-VALID_ROLES = ("admin", "account_manager", "management", "solution", "project", "product",
+VALID_ROLES = ("admin", "pod_head", "account_manager", "management", "solution", "project", "product",
                "engine1_exec", "super_admin")
 # Cross-functional roles that can only edit the Team Tasks section of an opportunity
 # (never TCV, the execution framework, or any other sales-owned field).
@@ -348,12 +349,48 @@ def _widen_user_roles(db):
         db.execute("UPDATE users SET pod = 'pods1' WHERE role != 'engine1_exec' AND pod IS NULL")
 
 
+def _widen_user_roles_for_pod_head(db):
+    """Add 'pod_head' to the users.role CHECK constraint for databases that were
+    already migrated past the super_admin rollout (so _widen_user_roles's own
+    guard skips them) but predate the PODS Head role. Same rebuild-in-place
+    approach - SQLite can't ALTER a CHECK constraint - copying every row across
+    unchanged."""
+    row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'"
+    ).fetchone()
+    if not row or not row["sql"] or "'pod_head'" in row["sql"]:
+        return  # table doesn't exist yet, or already migrated
+    db.executescript(
+        """
+        ALTER TABLE users RENAME TO users_pre_pod_head;
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN
+                ('admin', 'pod_head', 'account_manager', 'management', 'solution', 'project', 'product',
+                 'engine1_exec', 'super_admin')),
+            pod TEXT,
+            full_name TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CHECK ((role IN ('engine1_exec', 'super_admin') AND pod IS NULL) OR
+                   (role NOT IN ('engine1_exec', 'super_admin') AND pod IN ('pods1', 'pods2', 'pods3')))
+        );
+        INSERT INTO users (id, username, password, role, pod, full_name, created_at)
+            SELECT id, username, password, role, pod, full_name, created_at
+            FROM users_pre_pod_head;
+        DROP TABLE users_pre_pod_head;
+        """
+    )
+
+
 def migrate_db(db):
     """Add columns introduced after the first release, without touching data."""
     def columns(table):
         return {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
 
     _widen_user_roles(db)
+    _widen_user_roles_for_pod_head(db)
 
     deal_cols = columns("deals")
     if "pod" not in deal_cols:
@@ -401,6 +438,10 @@ def migrate_db(db):
         db.execute("ALTER TABLE deals ADD COLUMN expected_po_date TEXT DEFAULT ''")
     if "expected_revenue_date" not in deal_cols:
         db.execute("ALTER TABLE deals ADD COLUMN expected_revenue_date TEXT DEFAULT ''")
+    if "is_closed_lost" not in deal_cols:
+        db.execute("ALTER TABLE deals ADD COLUMN is_closed_lost BOOLEAN DEFAULT 0")
+    if "closed_lost_reason" not in deal_cols:
+        db.execute("ALTER TABLE deals ADD COLUMN closed_lost_reason TEXT DEFAULT ''")
 
     config_cols = columns("config")
     if "am_targets" not in config_cols:
@@ -430,6 +471,36 @@ def migrate_db(db):
         "SELECT name FROM sqlite_master WHERE type='table'"
     )} and "due" not in columns("deal_tasks"):
         db.execute("ALTER TABLE deal_tasks ADD COLUMN due TEXT DEFAULT ''")
+
+    if "deal_tasks" in {r[0] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}:
+        task_cols = columns("deal_tasks")
+        if "source_team" not in task_cols:
+            db.execute("ALTER TABLE deal_tasks ADD COLUMN source_team TEXT DEFAULT 'sales'")
+            # Best-effort backfill for existing rows: a cross-functional user who filed
+            # a task under their own team is the source; everything else defaults to
+            # 'sales' (admin/pod_head/account_manager), which is already the column default.
+            db.execute(
+                """UPDATE deal_tasks SET source_team = team
+                   WHERE EXISTS (
+                       SELECT 1 FROM users
+                       WHERE (users.full_name = deal_tasks.created_by OR users.username = deal_tasks.created_by)
+                         AND users.role = deal_tasks.team
+                         AND users.role IN ('solution', 'project', 'product')
+                   )"""
+            )
+        if "assigned_to" not in task_cols:
+            db.execute("ALTER TABLE deal_tasks ADD COLUMN assigned_to TEXT DEFAULT ''")
+            # Best-effort backfill: a task a cross-functional team filed on their own
+            # initiative was implicitly for the opportunity's AM to see - anything
+            # sales/admin filed already names its target via the `team` column, so
+            # leave those blank rather than guess an individual.
+            db.execute(
+                """UPDATE deal_tasks SET assigned_to = (
+                       SELECT assigned_am FROM deals WHERE deals.id = deal_tasks.deal_id
+                   ) WHERE source_team != 'sales' AND (assigned_to IS NULL OR assigned_to = '')"""
+            )
 
     # A database that already existed before super_admin was introduced won't get one
     # from the empty-table seed path below, so add a bootstrap account here instead -
@@ -468,6 +539,8 @@ def init_db():
             progress INTEGER DEFAULT 0,
             is_blocked BOOLEAN DEFAULT 0,
             blocker_description TEXT,
+            is_closed_lost BOOLEAN DEFAULT 0,
+            closed_lost_reason TEXT DEFAULT '',
             next_actions TEXT,
             strategy TEXT DEFAULT '',
             proofs TEXT DEFAULT '{}',
@@ -482,7 +555,7 @@ def init_db():
             username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN
-                ('admin', 'account_manager', 'management', 'solution', 'project', 'product',
+                ('admin', 'pod_head', 'account_manager', 'management', 'solution', 'project', 'product',
                  'engine1_exec', 'super_admin')),
             pod TEXT,
             full_name TEXT DEFAULT '',
@@ -497,11 +570,14 @@ def init_db():
             pod TEXT NOT NULL CHECK(pod IN ('pods1', 'pods2', 'pods3')),
             text TEXT NOT NULL,
             team TEXT NOT NULL CHECK(team IN ('solution', 'project', 'product')),
+            source_team TEXT NOT NULL DEFAULT 'sales' CHECK(source_team IN
+                ('sales', 'solution', 'project', 'product')),
             status TEXT NOT NULL DEFAULT 'not_started' CHECK(status IN
                 ('not_started', 'in_progress', 'blocked', 'needs_discussion', 'done')),
             note TEXT DEFAULT '',
             due TEXT DEFAULT '',
             created_by TEXT DEFAULT '',
+            assigned_to TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -658,11 +734,24 @@ def can_edit_deal(user, deal_row):
         return True
     if deal_row["pod"] != user.get("pod"):
         return False
-    if user["role"] == "admin":
+    if user["role"] in ("admin", "pod_head"):
         return True
     if user["role"] == "account_manager":
         return (deal_row["assigned_am"] or "") == (user["full_name"] or "")
     return False
+
+
+def is_valid_assignee(db, pod, name):
+    """A task's assigned_to must be a real, currently-registered user in that same
+    POD who isn't admin/pod_head/management - it's a picker, not free text."""
+    if not name or not pod:
+        return False
+    row = db.execute(
+        "SELECT 1 FROM users WHERE full_name = ? AND pod = ? "
+        "AND role NOT IN ('admin', 'pod_head', 'management')",
+        (name, pod),
+    ).fetchone()
+    return row is not None
 
 
 def query_pod_for(user):
@@ -732,6 +821,8 @@ def deal_to_dict(row):
         "progress": row["progress"],
         "is_blocked": bool(row["is_blocked"]),
         "blocker_description": row["blocker_description"] or "",
+        "is_closed_lost": bool(row["is_closed_lost"] if "is_closed_lost" in row.keys() else 0),
+        "closed_lost_reason": (row["closed_lost_reason"] if "closed_lost_reason" in row.keys() else "") or "",
         "next_actions": json.loads(row["next_actions"] or "[]"),
         "strategy": (row["strategy"] if "strategy" in row.keys() else "") or "",
         "proofs": normalize_proofs(
@@ -851,7 +942,7 @@ def login_log_to_dict(row):
 
 
 @app.route("/api/login_logs", methods=["GET"])
-@login_required(roles=("admin", "super_admin"))
+@login_required(roles=("admin", "pod_head", "super_admin"))
 def get_login_logs():
     db = get_db()
     pod = query_pod_for(g.current_user)
@@ -868,7 +959,7 @@ def get_login_logs():
 
 
 @app.route("/api/login_logs/export_xlsx", methods=["GET"])
-@login_required(roles=("admin", "super_admin"))
+@login_required(roles=("admin", "pod_head", "super_admin"))
 def export_login_logs_xlsx():
     try:
         from openpyxl import Workbook
@@ -964,7 +1055,7 @@ def get_deals():
 
 
 @app.route("/api/deals", methods=["POST"])
-@login_required(roles=("admin", "account_manager", "super_admin"))
+@login_required(roles=("admin", "pod_head", "account_manager", "super_admin"))
 def create_deal():
     data = request.get_json(force=True) or {}
     user = g.current_user
@@ -988,12 +1079,14 @@ def create_deal():
     new_blocked = bool(data.get("is_blocked"))
     stage = resolve_stage(db, data, new_proofs, new_blocked,
                           data.get("stage", "Prospecting"), "Prospecting")
+    new_closed_lost = bool(data.get("is_closed_lost"))
     cur = db.execute(
         """INSERT INTO deals
            (pod, deal_name, customer, assigned_am, squad, strategic_pillar, estimated_value,
             revenue_2026, target_quarter, stage, progress, is_blocked, blocker_description,
+            is_closed_lost, closed_lost_reason,
             next_actions, strategy, proofs, expected_po_date, expected_revenue_date, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
         (
             # A deal always belongs to its creator's own POD, or the POD a podless
             # super_admin explicitly picked - never anything else client-supplied.
@@ -1010,6 +1103,8 @@ def create_deal():
             int(data.get("progress", 0) or 0),
             1 if new_blocked else 0,
             data.get("blocker_description", ""),
+            1 if new_closed_lost else 0,
+            data.get("closed_lost_reason", ""),
             json.dumps(data.get("next_actions", [])),
             data.get("strategy", ""),
             json.dumps(new_proofs),
@@ -1023,7 +1118,7 @@ def create_deal():
 
 
 @app.route("/api/deals/<int:deal_id>", methods=["PUT"])
-@login_required(roles=("admin", "account_manager", "super_admin"))
+@login_required(roles=("admin", "pod_head", "account_manager", "super_admin"))
 def update_deal(deal_id):
     data = request.get_json(force=True) or {}
     user = g.current_user
@@ -1046,6 +1141,9 @@ def update_deal(deal_id):
     )
     upd_proofs = normalize_proofs(data.get("proofs", existing_proofs))
     upd_blocked = bool(data.get("is_blocked", row["is_blocked"]))
+    existing_closed_lost = bool(row["is_closed_lost"] if "is_closed_lost" in row.keys() else 0)
+    upd_closed_lost = bool(data.get("is_closed_lost", existing_closed_lost))
+    existing_closed_lost_reason = (row["closed_lost_reason"] if "closed_lost_reason" in row.keys() else "") or ""
     upd_stage = resolve_stage(db, data, upd_proofs, upd_blocked,
                               data.get("stage", row["stage"]), row["stage"])
     existing_po = row["expected_po_date"] if "expected_po_date" in row.keys() else ""
@@ -1054,7 +1152,8 @@ def update_deal(deal_id):
         """UPDATE deals SET
              deal_name = ?, customer = ?, assigned_am = ?, squad = ?, strategic_pillar = ?,
              estimated_value = ?, revenue_2026 = ?, target_quarter = ?, stage = ?, progress = ?,
-             is_blocked = ?, blocker_description = ?, next_actions = ?, strategy = ?, proofs = ?,
+             is_blocked = ?, blocker_description = ?, is_closed_lost = ?, closed_lost_reason = ?,
+             next_actions = ?, strategy = ?, proofs = ?,
              expected_po_date = ?, expected_revenue_date = ?,
              updated_at = CURRENT_TIMESTAMP
            WHERE id = ?""",
@@ -1071,6 +1170,8 @@ def update_deal(deal_id):
             int(data.get("progress", row["progress"]) or 0),
             1 if upd_blocked else 0,
             data.get("blocker_description", row["blocker_description"]),
+            1 if upd_closed_lost else 0,
+            data.get("closed_lost_reason", existing_closed_lost_reason),
             json.dumps(data.get("next_actions", json.loads(row["next_actions"] or "[]"))),
             data.get("strategy", existing_strategy),
             json.dumps(upd_proofs),
@@ -1085,7 +1186,7 @@ def update_deal(deal_id):
 
 
 @app.route("/api/deals/<int:deal_id>", methods=["DELETE"])
-@login_required(roles=("admin", "account_manager", "super_admin"))
+@login_required(roles=("admin", "pod_head", "account_manager", "super_admin"))
 def delete_deal(deal_id):
     db = get_db()
     row = db.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)).fetchone()
@@ -1099,7 +1200,7 @@ def delete_deal(deal_id):
 
 
 @app.route("/api/deals/bulk_delete", methods=["POST"])
-@login_required(roles=("admin", "account_manager", "super_admin"))
+@login_required(roles=("admin", "pod_head", "account_manager", "super_admin"))
 def bulk_delete_deals():
     """Delete several opportunities in one request. Same permission rule as the
     single-delete endpoint (can_edit_deal), just checked per id - an account_manager
@@ -1133,7 +1234,7 @@ def bulk_delete_deals():
 
 
 @app.route("/api/deals/<int:deal_id>/progress", methods=["PUT"])
-@login_required(roles=("admin", "account_manager", "super_admin"))
+@login_required(roles=("admin", "pod_head", "account_manager", "super_admin"))
 def update_progress(deal_id):
     data = request.get_json(force=True) or {}
     progress = max(0, min(100, int(data.get("progress", 0))))
@@ -1153,7 +1254,7 @@ def update_progress(deal_id):
 
 
 @app.route("/api/deals/<int:deal_id>/blocker", methods=["PUT"])
-@login_required(roles=("admin", "account_manager", "super_admin"))
+@login_required(roles=("admin", "pod_head", "account_manager", "super_admin"))
 def update_blocker(deal_id):
     data = request.get_json(force=True) or {}
     db = get_db()
@@ -1191,9 +1292,11 @@ def task_to_dict(row):
         "pod_label": POD_LABELS.get(row["pod"] if "pod" in keys else "", ""),
         "text": row["text"],
         "team": row["team"],
+        "source_team": (row["source_team"] if "source_team" in keys else "sales") or "sales",
         "status": row["status"],
         "note": row["note"] or "",
         "due": (row["due"] or "") if "due" in keys else "",
+        "assigned_to": (row["assigned_to"] if "assigned_to" in keys else "") or "",
         "created_by": row["created_by"] or "",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -1219,7 +1322,7 @@ def get_deal_tasks(deal_id):
 
 
 @app.route("/api/deals/<int:deal_id>/tasks", methods=["POST"])
-@login_required(roles=("admin", "account_manager", "super_admin") + CROSS_FUNCTIONAL_ROLES)
+@login_required(roles=("admin", "pod_head", "account_manager", "super_admin") + CROSS_FUNCTIONAL_ROLES)
 def create_deal_task(deal_id):
     data = request.get_json(force=True) or {}
     user = g.current_user
@@ -1232,16 +1335,26 @@ def create_deal_task(deal_id):
         # Solution/Project/Product can flag a follow-up on any opportunity, but only
         # ever under their own team - they can't file work on another team's behalf.
         team = user["role"]
+        source_team = user["role"]
     else:
         if not can_edit_deal(user, deal_row):
             return jsonify({"error": "You can only add tasks to opportunities assigned to you"}), 403
         team = str(data.get("team", "") or "").strip()
         if team not in CROSS_FUNCTIONAL_ROLES:
             return jsonify({"error": "A valid team (solution/project/product) is required"}), 400
+        source_team = "sales"
 
     text = str(data.get("text", "") or "").strip()
     if not text:
         return jsonify({"error": "text is required"}), 400
+
+    # Every task must name who it's actually for, not just which team - so the
+    # weekly review can see who to chase without opening the opportunity. It's a
+    # picker over registered users of the same POD (excluding admin/pod_head/
+    # management), not free text.
+    assigned_to = str(data.get("assigned_to", "") or "").strip()
+    if not is_valid_assignee(db, deal_row["pod"], assigned_to):
+        return jsonify({"error": "Choose who this task is assigned to from the user list"}), 400
 
     # The creator decides the starting status and an optional target date right away,
     # rather than always starting at "not_started" and having to change it afterward.
@@ -1252,9 +1365,10 @@ def create_deal_task(deal_id):
 
     creator = user.get("full_name") or user.get("username", "")
     cur = db.execute(
-        """INSERT INTO deal_tasks (deal_id, pod, text, team, status, due, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (deal_id, deal_row["pod"], text, team, status, due, creator),
+        """INSERT INTO deal_tasks (deal_id, pod, text, team, source_team, status, due,
+           created_by, assigned_to)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (deal_id, deal_row["pod"], text, team, source_team, status, due, creator, assigned_to),
     )
     db.commit()
     row = db.execute("SELECT * FROM deal_tasks WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -1273,11 +1387,12 @@ def update_task(task_id):
     user = g.current_user
     text, team, status, note = row["text"], row["team"], row["status"], row["note"]
     due = row["due"] if "due" in row.keys() else ""
+    assigned_to = row["assigned_to"] if "assigned_to" in row.keys() else ""
 
     if user["role"] in CROSS_FUNCTIONAL_ROLES:
-        # Own team's tasks only, and only within their own POD; text/status/note/due
-        # are theirs to keep current, but the team assignment itself is fixed - they
-        # can't move a task to another team.
+        # Own team's tasks only, and only within their own POD; text/status/note/due/
+        # assigned_to are theirs to keep current, but the team assignment itself is
+        # fixed - they can't move a task to another team.
         if row["team"] != user["role"] or row["pod"] != user.get("pod"):
             return jsonify({"error": "You can only update your own team's tasks"}), 403
         if str(data.get("text", "")).strip():
@@ -1291,7 +1406,12 @@ def update_task(task_id):
             note = str(data["note"] or "")
         if "due" in data:
             due = str(data["due"] or "").strip()[:10]
-    elif user["role"] in ("admin", "account_manager", "super_admin"):
+        if "assigned_to" in data:
+            new_assignee = str(data["assigned_to"] or "").strip()
+            if not is_valid_assignee(db, row["pod"], new_assignee):
+                return jsonify({"error": "Choose who this task is assigned to from the user list"}), 400
+            assigned_to = new_assignee
+    elif user["role"] in ("admin", "pod_head", "account_manager", "super_admin"):
         deal_row = db.execute("SELECT * FROM deals WHERE id = ?", (row["deal_id"],)).fetchone()
         if not deal_row or not can_edit_deal(user, deal_row):
             return jsonify({"error": "You can only edit tasks on opportunities assigned to you"}), 403
@@ -1311,13 +1431,34 @@ def update_task(task_id):
             note = str(data["note"] or "")
         if "due" in data:
             due = str(data["due"] or "").strip()[:10]
+        if "assigned_to" in data:
+            new_assignee = str(data["assigned_to"] or "").strip()
+            if not is_valid_assignee(db, row["pod"], new_assignee):
+                return jsonify({"error": "Choose who this task is assigned to from the user list"}), 400
+            assigned_to = new_assignee
+    elif user["role"] in ("management", "engine1_exec"):
+        # Read-only everywhere else, but these roles run the weekly review, so they
+        # can mark a task's checklist state (done / needs discussion / etc.) and log
+        # a note there - not the text, team, due date, or assignee, which stay owned
+        # by sales or the cross-functional team that filed the task. engine1_exec
+        # must stay within a POD it's currently viewing (or any, if none selected).
+        pod = query_pod_for(user)
+        if pod is not None and row["pod"] != pod:
+            return jsonify({"error": "Task not found"}), 404
+        if "status" in data:
+            new_status = str(data["status"] or "")
+            if new_status not in TASK_STATUSES:
+                return jsonify({"error": "Invalid status"}), 400
+            status = new_status
+        if "note" in data:
+            note = str(data["note"] or "")
     else:
         return jsonify({"error": "Forbidden"}), 403
 
     db.execute(
         """UPDATE deal_tasks SET text = ?, team = ?, status = ?, note = ?, due = ?,
-           updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
-        (text, team, status, note, due, task_id),
+           assigned_to = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+        (text, team, status, note, due, assigned_to, task_id),
     )
     db.commit()
     row = db.execute("SELECT * FROM deal_tasks WHERE id = ?", (task_id,)).fetchone()
@@ -1335,7 +1476,7 @@ def delete_task(task_id):
     if user["role"] in CROSS_FUNCTIONAL_ROLES:
         if row["team"] != user["role"] or row["pod"] != user.get("pod"):
             return jsonify({"error": "You can only delete your own team's tasks"}), 403
-    elif user["role"] in ("admin", "account_manager", "super_admin"):
+    elif user["role"] in ("admin", "pod_head", "account_manager", "super_admin"):
         deal_row = db.execute("SELECT * FROM deals WHERE id = ?", (row["deal_id"],)).fetchone()
         if not deal_row or not can_edit_deal(user, deal_row):
             return jsonify({"error": "You can only delete tasks on opportunities assigned to you"}), 403
@@ -1383,6 +1524,27 @@ def list_tasks():
     return jsonify([task_to_dict(r) for r in rows])
 
 
+@app.route("/api/assignable_users", methods=["GET"])
+@login_required()
+def get_assignable_users():
+    """Everyone a Team Task can actually be assigned to within one POD: every role
+    except admin/pod_head/management, who run the POD rather than execute
+    follow-ups. Used to populate the "Assigned to" picker so it's a real
+    selection, not free text. A pod-scoped caller always gets their own POD; a
+    podless caller (engine1_exec/super_admin) must pass ?pod=."""
+    db = get_db()
+    pod = query_pod_for(g.current_user)
+    if pod is None:
+        return jsonify([])  # podless with no ?pod= - nothing to scope to
+    rows = db.execute(
+        """SELECT full_name, role FROM users
+           WHERE pod = ? AND role NOT IN ('admin', 'pod_head', 'management') AND full_name != ''
+           ORDER BY full_name""",
+        (pod,),
+    ).fetchall()
+    return jsonify([{"full_name": r["full_name"], "role": r["role"]} for r in rows])
+
+
 # --------------------------------------------------------------------------
 # Users API - a POD's admin manages only that POD's users, and can never create,
 # edit, or delete a user in a different POD or a podless (engine1_exec/super_admin)
@@ -1393,7 +1555,7 @@ POD_USER_ROLES = tuple(r for r in VALID_ROLES if r not in PODLESS_ROLES)
 
 
 @app.route("/api/users", methods=["GET"])
-@login_required(roles=("admin", "super_admin"))
+@login_required(roles=("admin", "pod_head", "super_admin"))
 def get_users():
     db = get_db()
     user = g.current_user
@@ -1417,7 +1579,7 @@ def get_users():
 
 
 @app.route("/api/users", methods=["POST"])
-@login_required(roles=("admin", "super_admin"))
+@login_required(roles=("admin", "pod_head", "super_admin"))
 def create_user():
     data = request.get_json(force=True) or {}
     username = data.get("username", "").strip()
@@ -1458,7 +1620,7 @@ def create_user():
 
 
 @app.route("/api/users/<int:user_id>", methods=["PUT"])
-@login_required(roles=("admin", "super_admin"))
+@login_required(roles=("admin", "pod_head", "super_admin"))
 def update_user(user_id):
     data = request.get_json(force=True) or {}
     db = get_db()
@@ -1489,9 +1651,20 @@ def update_user(user_id):
     if data.get("password"):
         password_hash = _hash(data["password"])
 
+    username = row["username"]
+    if user["role"] == "super_admin" and str(data.get("username", "")).strip():
+        new_username = str(data["username"]).strip()
+        if new_username != username:
+            clash = db.execute(
+                "SELECT id FROM users WHERE username = ? AND id != ?", (new_username, user_id)
+            ).fetchone()
+            if clash:
+                return jsonify({"error": "Username already exists"}), 409
+            username = new_username
+
     db.execute(
-        "UPDATE users SET role = ?, pod = ?, full_name = ?, password = ? WHERE id = ?",
-        (role, pod, full_name, password_hash, user_id),
+        "UPDATE users SET username = ?, role = ?, pod = ?, full_name = ?, password = ? WHERE id = ?",
+        (username, role, pod, full_name, password_hash, user_id),
     )
     db.commit()
     row = db.execute(
@@ -1502,7 +1675,7 @@ def update_user(user_id):
 
 
 @app.route("/api/users/<int:user_id>", methods=["DELETE"])
-@login_required(roles=("admin", "super_admin"))
+@login_required(roles=("admin", "pod_head", "super_admin"))
 def delete_user(user_id):
     if g.current_user["user_id"] == user_id:
         return jsonify({"error": "Cannot delete your own account while logged in"}), 400
@@ -1642,7 +1815,7 @@ CONFIG_TAXONOMY_KEYS = ("strategic_pillars", "stages", "squads", "max_login_logs
 
 
 @app.route("/api/config", methods=["PUT"])
-@login_required(roles=("admin", "engine1_exec", "super_admin"))
+@login_required(roles=("admin", "pod_head", "engine1_exec", "super_admin"))
 def update_config():
     data = request.get_json(force=True) or {}
     db = get_db()
@@ -1686,7 +1859,7 @@ def update_config():
 DEAL_HEADERS = [
     "ID", "Opportunity", "Customer", "Account Manager", "Squad", "Strategic Pillar",
     "TCV (IDR)", "Rev 2026 (IDR)", "Target Quarter", "Stage", "Progress (%)",
-    "Blocked", "Blocker", "Strategy", "Next Actions",
+    "Blocked", "Blocker", "Closed Lost", "Closed Lost Reason", "Strategy", "Next Actions",
 ]
 # Config keys stored as JSON (lists/dicts) vs plain integers
 CONFIG_JSON_KEYS = ["strategic_pillars", "squads", "stages",
@@ -1695,12 +1868,22 @@ CONFIG_INT_KEYS = ["target_amount", "current_achievement", "recurring_revenue"]
 
 
 def actions_to_text(actions):
-    """[{action,done,due}] -> '[x] text @2026-08-15' lines (human readable + parseable)."""
+    """[{action,done,due}] (legacy Next Actions) or [{text,date,end,status}] (Timeline
+    Items) -> '[x] text @2026-08-15' lines (human readable) for the XLSX backup."""
     lines = []
     for a in actions or []:
-        mark = "[x]" if a.get("done") else "[ ]"
-        due = f" @{a['due']}" if a.get("due") else ""
-        lines.append(f"{mark} {a.get('action','')}{due}")
+        if "text" in a:  # Timeline Items shape
+            mark = "[x]" if a.get("status") == "done" else "[ ]"
+            label = a.get("text", "")
+            when = a.get("date", "")
+            if a.get("end"):
+                when = f"{when}..{a['end']}" if when else f"..{a['end']}"
+        else:  # legacy {action,done,due} shape
+            mark = "[x]" if a.get("done") else "[ ]"
+            label = a.get("action", "")
+            when = a.get("due", "")
+        due = f" @{when}" if when else ""
+        lines.append(f"{mark} {label}{due}")
     return "\n".join(lines)
 
 
@@ -1728,7 +1911,7 @@ def text_to_actions(text):
 
 
 @app.route("/api/export/xlsx", methods=["GET"])
-@login_required(roles=("admin", "super_admin"))
+@login_required(roles=("admin", "pod_head", "super_admin"))
 def export_xlsx():
     try:
         from openpyxl import Workbook
@@ -1769,15 +1952,16 @@ def export_xlsx():
             d["strategic_pillar"], d["estimated_value"], d["revenue_2026"],
             d["target_quarter"], d["stage"], d["progress"],
             "Yes" if d["is_blocked"] else "No", d["blocker_description"],
+            "Yes" if d["is_closed_lost"] else "No", d["closed_lost_reason"],
             d["strategy"], actions_to_text(d["next_actions"]),
         ])
     style_header(ws, len(DEAL_HEADERS))
-    for col, width in zip("ABCDEFGHIJKLMNO",
-                          [6, 38, 28, 18, 16, 22, 16, 16, 14, 14, 11, 9, 26, 50, 50]):
+    for col, width in zip("ABCDEFGHIJKLMNOPQ",
+                          [6, 38, 28, 18, 16, 22, 16, 16, 14, 14, 11, 9, 26, 12, 26, 50, 50]):
         ws.column_dimensions[col].width = width
     for row in ws.iter_rows(min_row=2):
-        row[13].alignment = Alignment(wrap_text=True, vertical="top")  # Strategy
-        row[14].alignment = Alignment(wrap_text=True, vertical="top")  # Next Actions
+        row[15].alignment = Alignment(wrap_text=True, vertical="top")  # Strategy
+        row[16].alignment = Alignment(wrap_text=True, vertical="top")  # Next Actions
 
     # --- Execution Framework (8 Enterprise Proofs), one row per deal per proof ---
     fw = wb.create_sheet("Execution Framework")
@@ -1865,7 +2049,7 @@ def export_xlsx():
 
 
 @app.route("/api/import/xlsx", methods=["POST"])
-@login_required(roles=("admin", "super_admin"))
+@login_required(roles=("admin", "pod_head", "super_admin"))
 def import_xlsx():
     try:
         from openpyxl import load_workbook
@@ -1920,7 +2104,9 @@ def import_xlsx():
                 name, s(r[2]), s(r[3]), s(r[4]), s(r[5]), n(r[6]), n(r[7]), s(r[8]),
                 s(r[9]) or "Prospecting", max(0, min(100, n(r[10]))),
                 1 if s(r[11]).lower() in ("yes", "true", "1") else 0,
-                s(r[12]), s(r[13]), json.dumps(text_to_actions(r[14])),
+                s(r[12]),
+                1 if s(r[13]).lower() in ("yes", "true", "1") else 0,
+                s(r[14]), s(r[15]), json.dumps(text_to_actions(r[16])),
             )
             existing = None
             if deal_id not in (None, ""):
@@ -1933,7 +2119,8 @@ def import_xlsx():
                 db.execute(
                     """UPDATE deals SET deal_name=?, customer=?, assigned_am=?, squad=?,
                        strategic_pillar=?, estimated_value=?, revenue_2026=?, target_quarter=?,
-                       stage=?, progress=?, is_blocked=?, blocker_description=?, strategy=?,
+                       stage=?, progress=?, is_blocked=?, blocker_description=?,
+                       is_closed_lost=?, closed_lost_reason=?, strategy=?,
                        next_actions=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND pod=?""",
                     payload + (int(deal_id), pod),
                 )
@@ -1943,9 +2130,10 @@ def import_xlsx():
                 cur = db.execute(
                     """INSERT INTO deals (pod, deal_name, customer, assigned_am, squad,
                        strategic_pillar, estimated_value, revenue_2026, target_quarter, stage,
-                       progress, is_blocked, blocker_description, strategy, next_actions,
+                       progress, is_blocked, blocker_description, is_closed_lost,
+                       closed_lost_reason, strategy, next_actions,
                        updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
                     (pod,) + payload,
                 )
                 seen_ids.add(cur.lastrowid)
@@ -2104,89 +2292,134 @@ def am_matches(perf_name, dash_name):
     return a == b or a.startswith(b) or b.startswith(a)
 
 
-def parse_performance_workbook(wb):
-    """Read the 'PODS (2)' and 'byAccount (BP)' sheets into plain dicts."""
-    am_rows, accounts = [], []
+def _parse_pods_sheet(sheet):
+    """Per-AM monthly target/actual/forecast + MRC/pipeline/PO + FY summary from a
+    single 'PODS (N)' sheet."""
+    am_rows = []
+    # Monthly triplets start at col D (index 4, 1-based); 3 cols per month.
+    # Only the first block (down to its "Total" row) carries the FY summary;
+    # the YTD block further down repeats the AM names with a different layout.
+    for r in range(4, 40):
+        first_col = str(sheet.cell(row=r, column=1).value or "").strip().lower()
+        if first_col == "total":
+            break
+        am = sheet.cell(row=r, column=3).value
+        if not am or str(am).strip().lower() in ("total", "am name"):
+            continue
+        monthly = []
+        for mi, mname in enumerate(MONTHS):
+            base = 4 + mi * 3
+            monthly.append({
+                "month": mname,
+                "target": _num(sheet.cell(row=r, column=base).value),
+                # Jan-Jun are actuals, Jul-Dec are forecast in this template
+                "value": _num(sheet.cell(row=r, column=base + 1).value),
+                "is_forecast": mi >= 6,
+            })
+        series = lambda start: [_num(sheet.cell(row=r, column=start + i).value)
+                                for i in range(12)]
+        am_rows.append({
+            "am": str(am).strip(),
+            "monthly": monthly,
+            "mrc_monthly": series(41),        # AO..AZ
+            "pipeline_monthly": series(55),   # BC..BN
+            "po_monthly": series(69),         # BQ..CB
+            "target_fy": _num(sheet.cell(row=r, column=85).value),   # CG
+            "actual_ytd": _num(sheet.cell(row=r, column=86).value),  # CH
+            "mrc_rest": _num(sheet.cell(row=r, column=87).value),    # CI
+            "po_hand": _num(sheet.cell(row=r, column=88).value),     # CJ
+            "forecast_fy": _num(sheet.cell(row=r, column=89).value),  # CK
+            "gap": _num(sheet.cell(row=r, column=90).value),          # CL
+            "conservative_pipeline": _num(sheet.cell(row=r, column=91).value),  # CM
+            "current_pipeline": _num(sheet.cell(row=r, column=93).value),       # CO
+        })
+    return am_rows
 
-    # ---- Sheet 1: per-AM monthly target/actual/forecast + MRC/pipeline/PO + summary
+
+def _parse_account_sheet(acc_sheet):
+    """Account-level monthly revenue from the 'byAccount (BP)' sheet."""
+    accounts = []
+    # header row 3: month columns start at col K (11) and run while dated
+    month_cols = []
+    for c in range(11, acc_sheet.max_column + 1):
+        h = acc_sheet.cell(row=3, column=c).value
+        if hasattr(h, "strftime"):
+            month_cols.append((c, h.strftime("%Y-%m")))
+        elif isinstance(h, str) and h[:4].isdigit() and "-" in h:
+            month_cols.append((c, h[:7]))
+    for r in range(4, acc_sheet.max_row + 1):
+        account = acc_sheet.cell(row=r, column=7).value
+        if not account:
+            continue
+        months = {}
+        for c, label in month_cols:
+            months[label] = _num(acc_sheet.cell(row=r, column=c).value)
+        if not any(months.values()):
+            continue
+        accounts.append({
+            "pillar": str(acc_sheet.cell(row=r, column=1).value or ""),
+            "revenue_category": str(acc_sheet.cell(row=r, column=4).value or ""),
+            "mrc_type": str(acc_sheet.cell(row=r, column=5).value or ""),
+            "account": str(account).strip(),
+            "pods": str(acc_sheet.cell(row=r, column=9).value or "").strip(),
+            "am": str(acc_sheet.cell(row=r, column=10).value or "").strip(),
+            "months": months,
+        })
+    return accounts
+
+
+def parse_performance_workbook(wb):
+    """Read the first 'PODS (N)' sheet and the 'byAccount (BP)' sheet into plain
+    dicts - the single-POD monthly ACH workbook format."""
     sheet = None
     for nm in wb.sheetnames:
         if nm.strip().lower().startswith("pods"):
             sheet = wb[nm]
             break
-    if sheet is not None:
-        # Monthly triplets start at col D (index 4, 1-based); 3 cols per month.
-        # Only the first block (down to its "Total" row) carries the FY summary;
-        # the YTD block further down repeats the AM names with a different layout.
-        for r in range(4, 40):
-            first_col = str(sheet.cell(row=r, column=1).value or "").strip().lower()
-            if first_col == "total":
-                break
-            am = sheet.cell(row=r, column=3).value
-            if not am or str(am).strip().lower() in ("total", "am name"):
-                continue
-            monthly = []
-            for mi, mname in enumerate(MONTHS):
-                base = 4 + mi * 3
-                monthly.append({
-                    "month": mname,
-                    "target": _num(sheet.cell(row=r, column=base).value),
-                    # Jan-Jun are actuals, Jul-Dec are forecast in this template
-                    "value": _num(sheet.cell(row=r, column=base + 1).value),
-                    "is_forecast": mi >= 6,
-                })
-            series = lambda start: [_num(sheet.cell(row=r, column=start + i).value)
-                                    for i in range(12)]
-            am_rows.append({
-                "am": str(am).strip(),
-                "monthly": monthly,
-                "mrc_monthly": series(41),        # AO..AZ
-                "pipeline_monthly": series(55),   # BC..BN
-                "po_monthly": series(69),         # BQ..CB
-                "target_fy": _num(sheet.cell(row=r, column=85).value),   # CG
-                "actual_ytd": _num(sheet.cell(row=r, column=86).value),  # CH
-                "mrc_rest": _num(sheet.cell(row=r, column=87).value),    # CI
-                "po_hand": _num(sheet.cell(row=r, column=88).value),     # CJ
-                "forecast_fy": _num(sheet.cell(row=r, column=89).value),  # CK
-                "gap": _num(sheet.cell(row=r, column=90).value),          # CL
-                "conservative_pipeline": _num(sheet.cell(row=r, column=91).value),  # CM
-                "current_pipeline": _num(sheet.cell(row=r, column=93).value),       # CO
-            })
+    am_rows = _parse_pods_sheet(sheet) if sheet is not None else []
 
-    # ---- Sheet 2: account-level monthly revenue
     acc_sheet = None
     for nm in wb.sheetnames:
         if "account" in nm.strip().lower():
             acc_sheet = wb[nm]
             break
-    if acc_sheet is not None:
-        # header row 3: month columns start at col K (11) and run while dated
-        month_cols = []
-        for c in range(11, acc_sheet.max_column + 1):
-            h = acc_sheet.cell(row=3, column=c).value
-            if hasattr(h, "strftime"):
-                month_cols.append((c, h.strftime("%Y-%m")))
-            elif isinstance(h, str) and h[:4].isdigit() and "-" in h:
-                month_cols.append((c, h[:7]))
-        for r in range(4, acc_sheet.max_row + 1):
-            account = acc_sheet.cell(row=r, column=7).value
-            if not account:
-                continue
-            months = {}
-            for c, label in month_cols:
-                months[label] = _num(acc_sheet.cell(row=r, column=c).value)
-            if not any(months.values()):
-                continue
-            accounts.append({
-                "pillar": str(acc_sheet.cell(row=r, column=1).value or ""),
-                "revenue_category": str(acc_sheet.cell(row=r, column=4).value or ""),
-                "mrc_type": str(acc_sheet.cell(row=r, column=5).value or ""),
-                "account": str(account).strip(),
-                "pods": str(acc_sheet.cell(row=r, column=9).value or "").strip(),
-                "am": str(acc_sheet.cell(row=r, column=10).value or "").strip(),
-                "months": months,
-            })
+    accounts = _parse_account_sheet(acc_sheet) if acc_sheet is not None else []
     return am_rows, accounts
+
+
+_HEAD_NUM_RE = re.compile(r"head\s*([123])\b", re.I)
+_POD_SHEET_RE = re.compile(r"^pods\s*\(?\s*([123])\s*\)?", re.I)
+
+
+def _head_label_to_pod(label):
+    m = _HEAD_NUM_RE.search(str(label or ""))
+    return f"pods{m.group(1)}" if m else None
+
+
+def parse_all_pods_workbook(wb):
+    """Read the Engine-1-wide monthly ACH workbook: one 'PODS (N)' sheet per POD
+    (N=1,2,3) plus a single shared 'byAccount (BP)' sheet whose rows are tagged
+    'Business Engine 1 Head N' - the same N as the sheet name. Returns
+    {pod: {"am_rows": [...], "accounts": [...]}} for whichever PODS are present."""
+    acc_sheet = None
+    for nm in wb.sheetnames:
+        if "account" in nm.strip().lower():
+            acc_sheet = wb[nm]
+            break
+    all_accounts = _parse_account_sheet(acc_sheet) if acc_sheet is not None else []
+
+    result = {}
+    for nm in wb.sheetnames:
+        m = _POD_SHEET_RE.match(nm.strip())
+        if not m:
+            continue
+        pod = f"pods{m.group(1)}"
+        am_rows = _parse_pods_sheet(wb[nm])
+        if not am_rows:
+            continue
+        accounts = [a for a in all_accounts if _head_label_to_pod(a.get("pods")) == pod]
+        result[pod] = {"am_rows": am_rows, "accounts": accounts}
+    return result
 
 
 @app.route("/api/performance", methods=["GET"])
@@ -2212,7 +2445,7 @@ def get_performance():
 
 
 @app.route("/api/config/am_targets/import", methods=["POST"])
-@login_required(roles=("admin", "super_admin"))
+@login_required(roles=("admin", "pod_head", "super_admin"))
 def import_am_targets():
     """Bulk-update AM Target/YTD Actual/Recurring FY26 from the same monthly
     'PODS (2)' performance workbook already used for Performance import, instead
@@ -2271,6 +2504,89 @@ def import_am_targets():
     shared = config_to_dict(get_shared_config_row(db))
     merged = merged_pod_config(shared, get_pod_config_row(db, pod), pod)
     return jsonify({"ok": True, "updated": updated, "unmatched": unmatched, "config": merged})
+
+
+@app.route("/api/config/am_targets/import_all_pods", methods=["POST"])
+@login_required(roles=("super_admin",))
+def import_all_pods_targets():
+    """One-shot import of the Engine-1-wide monthly ACH workbook: a single upload
+    with a 'PODS (1)'/'PODS (2)'/'PODS (3)' sheet each, plus a shared 'byAccount
+    (BP)' sheet. For every POD found, this is the authoritative source for that
+    POD's Performance snapshot, per-AM Target/YTD Actual/Recurring, and the POD's
+    own top-line Full-Year Target/Achieved/Recurring (set to the sum of that
+    POD's AM figures) - unlike the single-POD imports above, which only touch
+    the per-AM table and leave the top-line rollups untouched."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return jsonify({"error": "openpyxl is not installed on the server. "
+                                 "Run: pip install --user openpyxl, then reload."}), 500
+
+    upload = request.files.get("file")
+    if not upload:
+        return jsonify({"error": "No file uploaded"}), 400
+    label = (request.form.get("label") or "").strip()
+
+    try:
+        wb = load_workbook(upload, data_only=True)
+    except Exception as exc:
+        return jsonify({"error": f"Could not read this file as .xlsx ({exc})"}), 400
+
+    per_pod = parse_all_pods_workbook(wb)
+    if not per_pod:
+        return jsonify({"error": "No recognisable data. Expected sheets named like "
+                                 "'PODS (1)', 'PODS (2)', 'PODS (3)' and 'byAccount (BP)'."}), 400
+
+    db = get_db()
+    results = {}
+    for pod, data in per_pod.items():
+        am_rows, accounts = data["am_rows"], data["accounts"]
+
+        db.execute(
+            "INSERT INTO performance (pod, label, source_file, am_summary, accounts) VALUES (?, ?, ?, ?, ?)",
+            (pod, label or datetime.now().strftime("%b %Y"),
+             getattr(upload, "filename", "") or "",
+             json.dumps(am_rows), json.dumps(accounts)),
+        )
+        db.execute("""DELETE FROM performance WHERE pod = ? AND id NOT IN
+                      (SELECT id FROM performance WHERE pod = ? ORDER BY id DESC LIMIT 12)""",
+                   (pod, pod))
+
+        row = get_pod_config_row(db, pod)
+        cfg = config_to_dict(row)
+        am_targets = dict(cfg["am_targets"])
+        am_achievements = dict(cfg["am_achievements"])
+        am_recurring = dict(cfg["am_recurring"])
+
+        known_ams = [u["full_name"] for u in db.execute(
+            "SELECT full_name FROM users WHERE role = 'account_manager' AND pod = ?", (pod,)).fetchall()]
+
+        updated, unmatched = [], []
+        for r in am_rows:
+            dash_am = next((am for am in known_ams if am_matches(r["am"], am)), None)
+            if not dash_am:
+                unmatched.append(r["am"])
+                continue
+            am_targets[dash_am] = int(r["target_fy"] or 0)
+            am_achievements[dash_am] = int(r["actual_ytd"] or 0)
+            am_recurring[dash_am] = int(r["mrc_rest"] or 0)
+            updated.append(dash_am)
+
+        db.execute(
+            """UPDATE config SET target_amount = ?, current_achievement = ?, recurring_revenue = ?,
+               am_targets = ?, am_achievements = ?, am_recurring = ?,
+               updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (sum(am_targets.values()), sum(am_achievements.values()), sum(am_recurring.values()),
+             json.dumps(am_targets), json.dumps(am_achievements), json.dumps(am_recurring), row["id"]),
+        )
+        results[pod] = {
+            "pod_label": POD_LABELS.get(pod, pod),
+            "updated": updated, "unmatched": unmatched,
+            "am_count": len(am_rows), "account_rows": len(accounts),
+        }
+
+    db.commit()
+    return jsonify({"ok": True, "pods": results})
 
 
 # --------------------------------------------------------------------------
@@ -2433,8 +2749,9 @@ def import_tracker_xlsx():
             """INSERT INTO deals
                (pod, deal_name, customer, assigned_am, squad, strategic_pillar, estimated_value,
                 revenue_2026, target_quarter, stage, progress, is_blocked, blocker_description,
+                is_closed_lost, closed_lost_reason,
                 next_actions, strategy, proofs, expected_po_date, expected_revenue_date, updated_at)
-               VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, 'Prospecting', 0, 0, '', '[]', '', ?, '', '',
+               VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, 'Prospecting', 0, 0, '', 0, '', '[]', '', ?, '', '',
                        CURRENT_TIMESTAMP)""",
             (g["pod"], g["deal_name"], g["customer"], g["assigned_am"], default_pillar,
              g["estimated_value"], g["revenue_2026"], g["target_quarter"], json.dumps(proofs)),
@@ -2459,7 +2776,7 @@ def import_tracker_xlsx():
 
 
 @app.route("/api/performance/import", methods=["POST"])
-@login_required(roles=("admin", "super_admin"))
+@login_required(roles=("admin", "pod_head", "super_admin"))
 def import_performance():
     try:
         from openpyxl import load_workbook

@@ -77,6 +77,9 @@ them from Settings → User Management → Add User when that POD is ready to br
 
 - **admin** (per POD) — full CRUD on opportunities, users, and that POD's own settings/targets —
   never another POD's.
+- **pod_head** (per POD) — identical permissions to **admin**, scoped to the same one POD. A
+  separate role name for whoever holds org-chart oversight of a POD, distinct from the day-to-day
+  admin account; every permission check that applies to `admin` applies equally to `pod_head`.
 - **account_manager** (per POD) — can view **all** opportunities in their own POD but can only
   **create/edit/delete/update** the ones assigned to their own name. The UI shows a 🔒 lock on
   opportunities owned by other AMs, and the server independently rejects cross-AM (and cross-POD)
@@ -104,7 +107,10 @@ them from Settings → User Management → Add User when that POD is ready to br
   editing a POD's target figures all require a specific POD to be selected first — "All PODS
   combined" only makes sense for reading). It's the only role that can create or edit another
   `engine1_exec` or `super_admin` account, or move a user between PODS; a POD's own admin is
-  permanently confined to managing users within that one POD.
+  permanently confined to managing users within that one POD. It's also the only role that can
+  **rename a username** (Settings → User Management → edit a user — the Username field is locked
+  for every other role, including a POD's own admin/pod_head) and the only role that can run the
+  **multi-POD Engine 1 target import** (see §5).
 
 Enforced both in the UI and server-side (`can_edit_deal()`, `deal_visible_to()`, `query_pod_for()`,
 `mutation_pod_for()` in `app.py`).
@@ -168,6 +174,16 @@ Enforced both in the UI and server-side (`can_edit_deal()`, `deal_visible_to()`,
   them from the same monthly "PODS (2)" performance workbook already used for Performance import —
   only account managers matched by name in the file are changed, everyone else's figures are left
   untouched, and any unmatched names are reported back so nothing is silently skipped.
+- **Import Engine 1 Target & Performance (all PODS)** — super_admin only, in Settings. Upload the
+  monthly Engine 1 ACH workbook (one file with a "PODS (1)", "PODS (2)" and "PODS (3)" sheet plus a
+  shared "byAccount (BP)" sheet — sheet name and each row's "Business Engine 1 Head N" label both
+  identify which POD a row belongs to) and, for **every POD found in the file**, in one shot: store
+  that POD's Performance snapshot, bulk-update its per-AM Target/YTD Actual/Recurring, **and**
+  overwrite that POD's own top-line Full-Year Target/Achieved/Recurring with the sum of its AM
+  figures — unlike the single-POD imports above, which only touch the per-AM table and leave the
+  top-line rollups untouched. This makes the workbook the authoritative source for target,
+  achievement, YTD actual, recurring, and forecast across all three PODS at once, consolidated
+  automatically into the Engine-1-wide numbers shown when no single POD is selected.
 - **Strategy Coverage** — replaces the old wall-of-text playbook: per-AM coverage bars, a call-out
   listing opportunities that still have no strategy, and one collapsed line per documented deal that
   expands to read the full strategy.
@@ -198,43 +214,65 @@ Enforced both in the UI and server-side (`can_edit_deal()`, `deal_visible_to()`,
   first so nothing typed is silently lost. The **Save** button still works as before and closes the
   modal immediately.
 - **Action Plan tab** — a third tab in the opportunity edit modal, alongside Opportunity Details and
-  Execution Framework. It auto-collects every evidence entry across the 8 Enterprise Proofs that's
-  currently marked **Planned** — the team's to-do list for that opportunity — with its own status
-  selector so you can bump a step to In progress/Done right there (it disappears from this list the
-  moment it's no longer Planned). Below it, **Next actions** (ad-hoc items that don't belong to a
-  specific proof) now lives in its own tab too, instead of being tucked away in a collapsible on the
-  Execution Framework tab.
-- **Stage — manual** — an opportunity's Stage is set directly by the AM/admin in its edit form.
-  (Earlier builds could auto-derive it from execution-framework progress; that automation has been
-  removed so the team controls Stage explicitly.)
+  Execution Framework: **Milestones** (expected PO / revenue-booking dates), a **vertical Timeline**
+  built from the deal's own dated **Timeline Items**, and (for reference only, no longer feeding the
+  Timeline) every Execution Framework evidence entry currently marked **Planned**.
+- **Timeline Items** — the deal's own independent, directly-edited dated plan: add a line of text, a
+  start date, an optional end date, and a status (Not started / Planned / In progress / Done).
+  Deliberately **not derived from** the Execution Framework's Planned execution steps (which still
+  shows underneath, unchanged, for reference) — Timeline Items exist so you can jot down what's next
+  for this opportunity without tying it to a specific one of the 8 Enterprise Proofs.
+- **Action Plan timeline** — a **vertical** timeline plotting every dated Timeline Item together with
+  the two Milestone dates above, sorted chronologically from **today** (marked with a labeled row)
+  through to the end of the project — overdue items shown in red. It updates live as you edit a
+  Timeline Item's date or a milestone.
+- **Stage — manual** — an opportunity's Stage is set directly by the AM/admin/pod_head in its edit
+  form. (Earlier builds could auto-derive it from execution-framework progress; that automation has
+  been removed so the team controls Stage explicitly.)
+- **Closed Lost** — independent of the existing "This opportunity is blocked" flag, an opportunity
+  can also be marked **Closed Lost** with a free-text reason (e.g. "lost to competitor pricing,"
+  "budget cut"). The two flags don't interact — a deal can be blocked, closed-lost, both, or neither.
+  Shown as a badge on the Tracker table and the opportunity detail drawer wherever the Blocked badge
+  already appears, and included in the full XLSX backup export/import.
 - **Team Tasks — the Sales ↔ Solution/Project/Product bridge.** A fourth tab in the opportunity edit
-  modal where anyone who can touch it — Sales (AM/admin), or Solution/Project/Product themselves —
-  files a follow-up task, deciding its **status right away** (Not started / In progress / **Blocked**
-  / **Needs discussion** / Done — not stuck defaulting to Not started) and an optional **target date**
-  it needs to be resolved by. Sales sees the full opportunity and can assign a task to any of the
-  three teams, reassign or delete any task, and edit anything else on the deal as usual. A
-  cross-functional user instead gets a stripped-down version of the same modal (title "Team Tasks",
-  no other tabs, no Save button — just a read-only summary of the opportunity for context): they can
-  only file tasks under their *own* team and can only edit/delete their own team's tasks; every other
-  team's tasks on that opportunity show up locked (status, note and date disabled, no delete). Every
-  change saves immediately (not tied to a Save button), so it stays in sync in real time. Each
-  cross-functional team also gets its own **My Team Tasks** inbox — a focused worklist with no FY
-  target/gap/coverage noise — listing every task assigned to them across *all* opportunities, sorted
-  by **closest target date first** (done tasks sink to the bottom); tick a task done, change its
-  status, edit the note, or adjust the date, right there. Admin and management get a separate
-  **Weekly Meeting** board with the same closest-date-first sorting — every Blocked/Needs-discussion
-  item across the whole portfolio in one place, filterable by team and status, built specifically to
-  run the weekly cross-team sync and see what's most urgent to resolve. Unlike My Team Tasks, Weekly
-  Meeting is visible to **every role** (Sales and admin/management included, not just Solution/
-  Project/Product) so everyone can see the same picture ahead of the meeting; it's read-only there.
-  Like My Team Tasks, it hides the FY target/gap/coverage strip too — both are focused worklists.
-- **Action Plan timeline** — in the same Action Plan tab, Sales can set two **milestones** per
-  opportunity: the **expected PO date** and the **expected revenue booking date**. A **horizontal**
-  timeline right below plots those milestones together with every dated Planned execution step along
-  one dated axis, from **today** (marked with a red reference line) through to the end of the
-  project — regular steps as small dots, the PO/Revenue milestones as larger rings, overdue steps in
-  red, with a small legend underneath. It updates live as you edit either milestone date or a step's
-  date.
+  modal where anyone who can touch it — Sales (AM/admin/pod_head), or Solution/Project/Product
+  themselves — files a follow-up task, deciding its **status right away** (Not started / In progress
+  / **Blocked** / **Needs discussion** / Done — not stuck defaulting to Not started), a required
+  **"Assigned to"** person (who specifically this is for, not just which team), and an optional
+  **target date** it needs to be resolved by. "Assigned to" is a **searchable picker scoped to that
+  opportunity's own POD** — type to filter and pick from every registered user in that POD except
+  admin/pod_head/management; the field won't commit a name that isn't an exact match to a real user,
+  and the API rejects a create/edit whose `assigned_to` isn't one of them (`GET
+  /api/assignable_users?pod=`). Every task shows a **From → To** pair of chips (e.g. "Sales · Test Pod
+  Head → Solution") plus a name chip for who it's assigned to. Sales/admin/pod_head sees the full
+  opportunity and can assign a task to any of the three teams, reassign or delete any task, and edit
+  anything else on the deal as usual. A cross-functional user instead gets a stripped-down version of
+  the same modal (title "Team Tasks", no other tabs, no Save button — just a read-only summary of the
+  opportunity for context): they can only file tasks under their *own* team and can only edit/delete
+  their own team's tasks; every other team's tasks on that opportunity show up locked. Every change
+  saves immediately (not tied to a Save button). Each cross-functional team also gets its own **My
+  Team Tasks** inbox — a focused worklist listing every task assigned to their team across *all*
+  opportunities in their POD, sorted by closest target date first.
+- **Weekly Meeting board** — visible to every role (Sales and admin/management/pod_head/engine1_exec
+  included, not just Solution/Project/Product) so everyone sees the same picture ahead of the sync;
+  scoped to one POD for pod-scoped roles, or the header POD selector for podless roles. Tasks are
+  grouped into **collapsible threads by opportunity** — the board opens to a scannable list of project
+  names with an item count, and each thread expands (or collapses again) independently; expand state
+  is remembered for the rest of the session. Each task inside an expanded thread has its own status
+  dropdown and note field, editable right there. Editability follows the same ownership rule as Team
+  Tasks (a cross-functional team can only touch its own tasks, an AM only their own deals, admin/
+  pod_head/super_admin everything); **management and engine1_exec** can also change status/note on
+  any task in view, so they can run the review, without gaining edit rights over the opportunity
+  itself. **Admin/pod_head/super_admin** additionally get two one-click buttons on every task —
+  **"Mark solved"** and **"Needs further discussion"** — plus a delete (trash) icon with a
+  confirmation prompt, to remove a stale or duplicate task from the Weekly Meeting entirely. Once a
+  task is marked Done it moves out of the active thread list into a separate, collapsed-by-default
+  **"Solved"** panel below, so the main board stays focused on what's still open.
+- **Get Weekly Summary** — a button on the Weekly Meeting tab that pulls together, condensed by
+  opportunity, what **happened in the last 7 days** and what's **planned for the next 7 days**:
+  team tasks, Timeline Items, and dated Execution Framework evidence entries, grouped one card per
+  opportunity with a bullet per item so the meeting can scan a handful of cards instead of a long
+  flat list.
 - **Framework analytics** — Analytics shows a proof-by-proof funnel (done / in progress / not
   started across the filtered deals), completion by Account Manager, and a click-to-drill list of the
   deals stuck at any given proof. The PDF report includes the same breakdown.
@@ -315,21 +353,35 @@ super_admin) takes `{"ids": [...]}` and applies the exact same per-id permission
 delete — ids that don't exist or aren't editable by the caller are skipped and returned in a
 `skipped` list (with a reason) rather than failing the whole request; `deleted`/`deleted_ids` report
 what actually went through. Each deal includes `pod` and a display `pod_label`.
-**Users** — `GET/POST /api/users`, `PUT/DELETE /api/users/<id>`. A POD's own admin is confined to
-that POD and to pod-scoped roles (`admin`, `account_manager`, `management`, `solution`, `project`,
-`product`) - it can never create, promote to, or manage an `engine1_exec`/`super_admin` account.
-`super_admin` manages users in **any** POD (via a `pod` field in the request body) and is the only
-role that can create/edit another `engine1_exec` or `super_admin` account, or move a user's POD.
+**Users** — `GET/POST /api/users`, `PUT/DELETE /api/users/<id>`. A POD's own admin/pod_head is
+confined to that POD and to pod-scoped roles (`admin`, `pod_head`, `account_manager`, `management`,
+`solution`, `project`, `product`) - it can never create, promote to, or manage an
+`engine1_exec`/`super_admin` account. `super_admin` manages users in **any** POD (via a `pod` field
+in the request body) and is the only role that can create/edit another `engine1_exec` or
+`super_admin` account, move a user's POD, or **rename a `username`** (a `PUT` with `username` set is
+ignored for every other role; a colliding username is rejected with 409).
+**Assignable users** — `GET /api/assignable_users?pod=` (any authenticated user) → `[{full_name,
+role}]` for every user in that POD except `admin`/`pod_head`/`management`, ordered by name; powers
+the searchable "Assigned to" picker on Team Tasks so it's a real selection, not free text. Pod-scoped
+callers ignore `?pod=` (always their own POD, per the scoping rule above); a podless caller with no
+`?pod=` gets an empty list.
 **Team Tasks** — `GET/POST /api/deals/<id>/tasks` (list: any authenticated role, POD-checked against
-the deal; create: admin/owning AM/super_admin choosing any team, or a cross-functional role creating
-only under its own team — the `team` field is ignored and forced server-side for them; both may set
-the starting `status` and an optional `due` date at creation time), `PUT/DELETE /api/tasks/<id>`
-(cross-functional roles may edit/delete only their own team's tasks in their own POD, and can change
-`text`/`status`/`note`/`due` but never `team`; admin/owning AM/super_admin can edit or delete any
-field on any task on their deals), `GET /api/tasks?team=&status=&scope=&pod=` (cross-opportunity
+the deal; create: admin/owning AM/pod_head/super_admin choosing any team, or a cross-functional role
+creating only under its own team — the `team` field is ignored and forced server-side for them; both
+must supply an `assigned_to` that exactly matches a real user from `/api/assignable_users` in that
+deal's POD — a blank, missing, or unrecognized name is rejected with 400 — and may set the starting
+`status` and an optional `due` date at creation time), `PUT/DELETE /api/tasks/<id>` (cross-functional
+roles may edit/delete only their own team's tasks in their own POD, and can change
+`text`/`status`/`note`/`due`/`assigned_to` but never `team`; admin/owning AM/pod_head/super_admin can
+edit or delete any field on any task on their deals; `management`/`engine1_exec` may `PUT`
+`status`/`note` only, on any task in view — powers the inline checklist editing and the one-click
+Mark Solved / Needs Discussion buttons on the Weekly Meeting board — and cannot delete or change
+`text`/`team`/`due`/`assigned_to`), `GET /api/tasks?team=&status=&scope=&pod=` (cross-opportunity
 list, any authenticated role — by default a cross-functional role only ever sees its own team's
 tasks; pass `scope=all` to see every team's tasks instead, which is what the shared Weekly Meeting
-board uses).
+board uses). Every task also carries `source_team` (`sales`, or one of `solution`/`project`/`product`
+when that team files its own follow-up) and `assigned_to` (the individual it's assigned to, validated
+against `/api/assignable_users`) alongside `team` (which team it's assigned to).
 **Config** — `GET /api/config?pod=` (all authenticated roles), `PUT /api/config`: admin edits their
 own POD's `target_amount`/`am_targets`/`am_achievements`/`am_recurring`/`current_achievement`/
 `recurring_revenue` only; `engine1_exec` edits only the shared `strategic_pillars`/`stages`/
@@ -338,8 +390,17 @@ fields need that POD resolved via `mutation_pod_for`, taxonomy fields don't) - e
 silently ignores fields it doesn't own. The GET response merges the shared taxonomy with either one
 POD's figures (`pod`/`pod_label` reflect which) or, for a podless role with no `?pod=`, all three
 summed plus a `pods_breakdown` array of each POD's own figures.
-Deals carry `estimated_value` (TCV), `revenue_2026`, and the two Action Plan milestones
-`expected_po_date` / `expected_revenue_date`.
+**`POST /api/config/am_targets/import_all_pods`** (super_admin only) — the multi-POD Engine 1 ACH
+workbook import (see §5): one upload with a `PODS (1)`/`PODS (2)`/`PODS (3)` sheet each, routed by
+sheet name, plus a shared `byAccount (BP)` sheet split by each row's `Business Engine 1 Head N`
+label. For every POD found, stores a Performance snapshot, bulk-updates per-AM
+target/YTD/recurring, and overwrites that POD's `target_amount`/`current_achievement`/
+`recurring_revenue` with the sum of its (now-updated) AM figures. Returns `{pods: {<pod>: {pod_label,
+updated, unmatched, am_count, account_rows}}}`. Ignores the header POD selector entirely - it always
+targets whichever PODS actually appear as sheets in the file.
+Deals carry `estimated_value` (TCV), `revenue_2026`, the two Action Plan milestones
+`expected_po_date` / `expected_revenue_date`, and `is_closed_lost`/`closed_lost_reason` (independent
+of `is_blocked`/`blocker_description` - a deal can carry either, both, or neither).
 **Data Backup** — `GET /api/export/xlsx`, `POST /api/import/xlsx` (admin or super_admin; a podless
 super_admin must resolve a POD via `mutation_pod_for` first or gets a 400) - both POD-scoped, same
 guarantee as deals: an ID or username collision with another POD is treated as new, never merged in.
