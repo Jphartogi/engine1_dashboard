@@ -879,11 +879,13 @@
           <span id="perfUploadWrap" class="flex items-center gap-2" style="display:none">
             <input id="perfFile" type="file" accept=".xlsx" class="text-xs" style="color:var(--text-muted)">
             <input id="perfLabel" type="text" placeholder="Label e.g. Jul 2026" class="field text-xs px-2 py-1" style="width:130px">
+            <label id="perfAllPodsLabel" class="flex items-center gap-1.5 text-xs" style="color:var(--text-muted);display:none"><input id="perfAllPodsCheckbox" type="checkbox"> All PODS</label>
             <button id="perfImportBtn" class="btn-primary text-sm px-3 py-1.5 rounded-lg"><i class="fa-solid fa-file-arrow-up mr-1"></i>Upload monthly file</button>
           </span>
         </div>
+        <p id="perfAllPodsResult" class="text-[11px] mb-3" style="color:var(--text-muted)"></p>
         <p id="perfEmpty" class="card elev p-8 text-center text-sm" style="color:var(--text-muted)">
-          No performance data yet. An admin/pod_head can upload the monthly ACH workbook from the performance team using the button above — either a single-POD file, or the Engine-1-wide file (matched to your own POD).
+          No performance data yet. An admin/pod_head can upload the monthly ACH workbook from the performance team using the button above — either a single-POD file, or the Engine-1-wide file (matched to your own POD, or tick "All PODS" if you're super_admin).
         </p>
 
         <div id="perfBody" style="display:none">
@@ -1448,6 +1450,7 @@ async function enterApp(){
   document.getElementById('quickSettingsBtn').style.display = ((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('quickConfigBtn').style.display = (ROLE==='engine1_exec'||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('perfUploadWrap').style.display = ((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin') ? '' : 'none';
+  document.getElementById('perfAllPodsLabel').style.display = ROLE==='super_admin' ? '' : 'none';
   document.getElementById('amTargetsImportWrap').style.display = ((ROLE==='admin'||ROLE==='pod_head')||ROLE==='super_admin') ? '' : 'none';
   document.getElementById('allPodsImportWrap').style.display = ROLE==='super_admin' ? '' : 'none';
   document.getElementById('trackerImportWrap').style.display = ROLE==='super_admin' ? '' : 'none';
@@ -2757,10 +2760,28 @@ document.getElementById('pfChurnBasis').addEventListener('change',renderPerforma
 document.getElementById('perfImportBtn').addEventListener('click',()=>{
   const f=document.getElementById('perfFile').files[0];
   if(!f){ showToast('Choose the monthly .xlsx first',true); return; }
+  const allPods = ROLE==='super_admin' && document.getElementById('perfAllPodsCheckbox').checked;
+  const lbl=document.getElementById('perfLabel').value.trim();
+
+  if(allPods){
+    openConfirm(`Upload "${f.name}" as the current performance snapshot for every POD found in the file? This also updates each POD's Full-Year Target/Achieved/Recurring and per-AM figures. Previous snapshots are kept (last 12 per POD).`, async()=>{
+      try{
+        const fd=new FormData(); fd.append('file',f); if(lbl) fd.append('label',lbl);
+        const res=await fetch('/api/config/am_targets/import_all_pods',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:fd});
+        const data=await res.json();
+        if(!res.ok) throw new Error(data.error||'Import failed');
+        document.getElementById('perfAllPodsResult').innerHTML = Object.values(data.pods).map(p=>`<b style="color:var(--text)">${escapeHtml(p.pod_label)}</b>: ${p.am_count} AM(s), ${p.account_rows} account rows (${p.updated.length} target(s) matched)`).join(' · ');
+        showToast(`Imported ${Object.keys(data.pods).length} POD(s)`);
+        await loadConfig(); await loadPerformance(); renderPerformance();
+      }catch(err){ showToast(err.message,true); }
+    });
+    return;
+  }
+
   openConfirm(`Upload "${f.name}" as the current performance snapshot? Previous snapshots are kept (last 12).`, async()=>{
     try{
       const fd=appendPodToFormData(new FormData()); fd.append('file',f);
-      const lbl=document.getElementById('perfLabel').value.trim(); if(lbl) fd.append('label',lbl);
+      if(lbl) fd.append('label',lbl);
       const res=await fetch('/api/performance/import',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:fd});
       const data=await res.json();
       if(!res.ok) throw new Error(data.error||'Import failed');
