@@ -2822,9 +2822,7 @@ function renderPerformance(){
   const body=document.getElementById('perfBody'), empty=document.getElementById('perfEmpty');
   if(!PERF||!PERF.available){
     body.style.display='none'; empty.style.display=''; document.getElementById('perfSnapshot').textContent='no data';
-    empty.textContent = (PODLESS_ROLES_JS.includes(ROLE) && !ENGINE1_POD_FILTER)
-      ? 'Performance is tracked per POD. Pick a POD from the header selector above to see its data — "All PODS" has no single combined snapshot.'
-      : 'No performance data yet. An admin/pod_head can upload the monthly ACH workbook from the performance team using the button above — either a single-POD file, or the Engine-1-wide file (matched to your own POD).';
+    empty.textContent = 'No performance data yet for any POD. An admin/pod_head can upload the monthly ACH workbook from the performance team using the button above — either a single-POD file, or the Engine-1-wide file.';
     return;
   }
   empty.style.display='none'; body.style.display='';
@@ -2832,7 +2830,7 @@ function renderPerformance(){
 
   // AM filter options come from the snapshot itself
   const sel=document.getElementById('perfFilterAM'), keep=sel.value;
-  sel.innerHTML='<option value="">All Account Managers</option>'+PERF.am_summary.map(a=>`<option>${escapeHtml(a.am)}</option>`).join('');
+  sel.innerHTML='<option value="">All Account Managers</option>'+PERF.am_summary.map(a=>`<option>${escapeHtml(a.am)}${a.pod_label?` (${escapeHtml(a.pod_label)})`:''}</option>`).join('');
   sel.value=keep;
 
   const rows=perfAMRows();

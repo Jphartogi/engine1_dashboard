@@ -2448,20 +2448,58 @@ def parse_all_pods_workbook(wb):
 def get_performance():
     db = get_db()
     pod = query_pod_for(g.current_user)
-    if pod is None:
-        return jsonify({"available": False})  # no single combined snapshot across PODS
-    row = db.execute(
-        "SELECT * FROM performance WHERE pod = ? ORDER BY id DESC LIMIT 1", (pod,)
-    ).fetchone()
-    if not row:
+    if pod is not None:
+        row = db.execute(
+            "SELECT * FROM performance WHERE pod = ? ORDER BY id DESC LIMIT 1", (pod,)
+        ).fetchone()
+        if not row:
+            return jsonify({"available": False})
+        return jsonify({
+            "available": True,
+            "label": row["label"],
+            "source_file": row["source_file"],
+            "uploaded_at": row["uploaded_at"],
+            "am_summary": json.loads(row["am_summary"] or "[]"),
+            "accounts": json.loads(row["accounts"] or "[]"),
+            "pod": pod,
+            "pod_label": POD_LABELS.get(pod, ""),
+        })
+
+    # Podless with no ?pod= selected: combine the latest snapshot from each of the
+    # three PODS into one Engine-1-wide view - concatenate each POD's AM rows and
+    # account rows (tagged with which POD they came from) rather than re-summing
+    # per AM, since an AM belongs to exactly one POD.
+    am_summary, accounts, uploaded_ats, pods_included = [], [], [], []
+    for p in PODS:
+        row = db.execute(
+            "SELECT * FROM performance WHERE pod = ? ORDER BY id DESC LIMIT 1", (p,)
+        ).fetchone()
+        if not row:
+            continue
+        pods_included.append(p)
+        if row["uploaded_at"]:
+            uploaded_ats.append(row["uploaded_at"])
+        for a in json.loads(row["am_summary"] or "[]"):
+            a = dict(a)
+            a["pod"] = p
+            a["pod_label"] = POD_LABELS.get(p, "")
+            am_summary.append(a)
+        for acc in json.loads(row["accounts"] or "[]"):
+            acc = dict(acc)
+            acc["pod"] = p
+            accounts.append(acc)
+    if not pods_included:
         return jsonify({"available": False})
     return jsonify({
         "available": True,
-        "label": row["label"],
-        "source_file": row["source_file"],
-        "uploaded_at": row["uploaded_at"],
-        "am_summary": json.loads(row["am_summary"] or "[]"),
-        "accounts": json.loads(row["accounts"] or "[]"),
+        "label": "All PODS (Engine 1)",
+        "source_file": "",
+        "uploaded_at": max(uploaded_ats) if uploaded_ats else "",
+        "am_summary": am_summary,
+        "accounts": accounts,
+        "pod": None,
+        "pod_label": "All PODS (Engine 1)",
+        "pods_included": pods_included,
     })
 
 
