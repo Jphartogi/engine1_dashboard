@@ -26,6 +26,11 @@ from functools import wraps
 from flask import Flask, g, jsonify, render_template, request, send_file
 from werkzeug.security import check_password_hash, generate_password_hash
 
+# Semantic version (MAJOR.MINOR.PATCH) for this deployment - bump on every
+# feature/fix and record it in CHANGELOG.md, so "which version is live" is
+# always answerable from the UI (bottom of the nav rail) or GET /api/version.
+APP_VERSION = "1.3.0"
+
 # Keep the database next to app.py so it persists in a predictable location
 # regardless of the host's working directory (Render, PythonAnywhere, Docker, etc.).
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -840,7 +845,12 @@ def deal_to_dict(row):
 # --------------------------------------------------------------------------
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", app_version=APP_VERSION)
+
+
+@app.route("/api/version", methods=["GET"])
+def get_version():
+    return jsonify({"version": APP_VERSION})
 
 
 # --------------------------------------------------------------------------
